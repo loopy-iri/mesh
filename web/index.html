@@ -4,81 +4,338 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#0b1120" />
-    <title>P2P Secure Mesh</title>
+    <title>پیام‌رسان مش امن و غیرمتمرکز (P2P Secure Mesh)</title>
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <!-- Topbar Header -->
     <header class="topbar">
-      <h1>شبکه مش امن</h1>
-      <span id="connection-summary" class="pill">در حال بارگذاری…</span>
+      <div class="brand">
+        <span class="logo-dot"></span>
+        <h1>پیام‌رسان مش امن</h1>
+        <span class="badge-blockchain" id="blockchain-pill" title="دفترکل بلاکچینی فعال">⛓️ بلاکچین فعال</span>
+      </div>
+      <div class="top-status">
+        <span id="connection-summary" class="pill">در حال اتصال…</span>
+        <span id="offline-badge" class="pill pill-offline" hidden>حالت آفلاین</span>
+      </div>
     </header>
+
+    <!-- Navigation Tabs -->
     <nav class="tabs">
-      <button class="tab active" data-tab="identity">هویت</button>
-      <button class="tab" data-tab="peers">همتاها</button>
-      <button class="tab" data-tab="messages">پیام‌ها</button>
-      <button class="tab" data-tab="logs">گزارش</button>
+      <button class="tab active" data-tab="chat">
+        <span class="tab-icon">💬</span>
+        <span class="tab-text">پیام‌رسان</span>
+      </button>
+      <button class="tab" data-tab="peers">
+        <span class="tab-icon">👥</span>
+        <span class="tab-text">همتاها و اتصال</span>
+      </button>
+      <button class="tab" data-tab="guide">
+        <span class="tab-icon">📖</span>
+        <span class="tab-text">راهنمای آسان</span>
+      </button>
+      <button class="tab" data-tab="identity">
+        <span class="tab-icon">⚙️</span>
+        <span class="tab-text">هویت و رله</span>
+      </button>
+      <button class="tab" data-tab="logs">
+        <span class="tab-icon">📜</span>
+        <span class="tab-text">دفترکل</span>
+      </button>
     </nav>
+
     <main>
-      <section id="tab-identity" class="panel active">
-        <div class="card">
-          <h2>هویت محلی</h2>
-          <label>شناسه همتا (Peer ID)</label>
-          <code id="self-peer-id" class="mono block">—</code>
-          <label>سرور سیگنالینگ</label>
-          <input id="relay-url" type="url" inputmode="url" placeholder="https://example.org" />
-          <div class="row">
-            <button id="save-relay" class="secondary">ذخیره سرور</button>
-            <button id="regenerate-identity" class="danger">تولید هویت جدید</button>
+      <!-- TAB 1: Modern Chat / Messenger -->
+      <section id="tab-chat" class="panel active">
+        <div class="chat-container">
+          <!-- Chat sidebar / conversation selector -->
+          <div class="chat-sidebar">
+            <div class="chat-sidebar-header">
+              <h3>گفتگوها</h3>
+              <span id="active-peers-count" class="badge">۰ متصل</span>
+            </div>
+            <ul id="conversation-list" class="conversation-list">
+              <!-- Rendered via JS -->
+            </ul>
+          </div>
+
+          <!-- Chat conversation area -->
+          <div class="chat-window">
+            <div class="chat-header">
+              <div class="chat-header-info">
+                <button id="back-to-convs-btn" class="icon-btn mobile-only" title="بازگشت به لیست">◀</button>
+                <div class="avatar" id="current-chat-avatar">📢</div>
+                <div>
+                  <h3 id="current-chat-title">کانال همگانی مش</h3>
+                  <span id="current-chat-status" class="meta">انتشار عمومی به تمام نودهای متصل</span>
+                </div>
+              </div>
+              <div class="chat-header-actions">
+                <span class="blockchain-verified-tag" id="chat-ledger-badge" title="هر پیام با رمزنگاری در دفترکل زنجیره‌ای ثبت می‌شود">
+                  🔒 دفترکل معتبر
+                </span>
+              </div>
+            </div>
+
+            <!-- Messages stream -->
+            <div id="chat-messages" class="chat-messages">
+              <div class="chat-welcome">
+                <p>به پیام‌رسان مش خوش آمدید. پیام‌ها با امضای دیجیتال و ساختار زنجیره‌ای (بلاکچین) بدون نیاز به سرور مرکزی دست‌به‌دست منتقل می‌شوند.</p>
+              </div>
+            </div>
+
+            <!-- Quick quick-reply chips for emergency / fast replies -->
+            <div class="quick-chips">
+              <button class="chip" data-text="سلام 👋">سلام 👋</button>
+              <button class="chip" data-text="من سالمم و اوضاع امنه 🛡️">من سالمم 🛡️</button>
+              <button class="chip" data-text="نیاز به کمک دارم 🆘">کمک اضطراری 🆘</button>
+              <button class="chip" data-text="پیام دریافت شد، تایید ✅">تایید شد ✅</button>
+            </div>
+
+            <!-- Chat input bar -->
+            <form id="chat-form" class="chat-input-bar">
+              <textarea
+                id="chat-input"
+                rows="1"
+                placeholder="پیام خود را بنویسید..."
+                required
+              ></textarea>
+              <button type="submit" id="chat-send-btn" class="send-btn" title="ارسال پیام">
+                <span>ارسال</span>
+                <span class="send-icon">➤</span>
+              </button>
+            </form>
           </div>
         </div>
+      </section>
+
+      <!-- TAB 2: Peers & Air-Gapped Connection -->
+      <section id="tab-peers" class="panel">
+        <!-- Air-Gapped / Offline Direct Connect Card -->
+        <div class="card card-highlight">
+          <div class="card-header-with-badge">
+            <h2>⚡ اتصال مستقیم و آفلاین (بدون سرور / Air-Gap)</h2>
+            <span class="tag tag-ok">۱۰۰٪ بدون اینترنت</span>
+          </div>
+          <p class="hint">
+            اگر دامنه اصلی، اینترنت یا سرورها کاملاً قطع شدند، دو گوشی در یک شبکه وای‌فای یا هات‌اسپات می‌توانند فقط با اسکن متقابل کدها مستقیماً به هم وصل شوند!
+          </p>
+
+          <div class="direct-connect-box">
+            <div class="row">
+              <button id="btn-airgap-create-offer" class="secondary">
+                ۱. ایجاد کد اتصال مستقیم (گوشی اول)
+              </button>
+              <button id="btn-airgap-scan" class="secondary">
+                ۲. اسکن با دوربین
+              </button>
+            </div>
+
+            <div id="airgap-stage" class="airgap-stage" hidden>
+              <h4 id="airgap-stage-title">کد اتصال آفلاین</h4>
+              <p id="airgap-stage-desc" class="hint"></p>
+              <canvas id="airgap-qr" class="qr"></canvas>
+              <textarea id="airgap-text" class="mono" rows="3" readonly></textarea>
+              <div class="row">
+                <button id="airgap-copy-btn" class="secondary">کپی کد</button>
+                <button id="airgap-done-btn" class="secondary">انجام شد / بستن</button>
+              </div>
+            </div>
+
+            <div id="airgap-manual-input" class="airgap-manual-box" style="margin-top: 0.6rem;">
+              <textarea id="airgap-paste-code" class="mono" rows="2" placeholder="یا کد آفلاین دریافتی را اینجا قرار دهید"></textarea>
+              <button id="btn-airgap-apply" class="secondary">اعمال کد آفلاین</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- My QR Invite -->
         <div class="card">
-          <h2>دعوت‌نامه من</h2>
-          <p class="hint">این کد را برای همتای مقابل اسکن کنید.</p>
+          <h2>دعوت‌نامه هویت من (QR)</h2>
+          <p class="hint">دوستانتان می‌توانند این کد را اسکن کنند تا به شبکه شما بپیوندند.</p>
           <canvas id="invite-qr" class="qr"></canvas>
-          <textarea id="invite-text" class="mono" rows="4" readonly></textarea>
+          <textarea id="invite-text" class="mono" rows="3" readonly></textarea>
           <button id="copy-invite" class="secondary">کپی متن دعوت</button>
         </div>
+
+        <!-- Add peer via standard scanner / paste -->
         <div class="card">
-          <h2>افزودن همتا</h2>
+          <h2>افزودن و اسکن همتا</h2>
           <video id="scanner-video" playsinline muted hidden></video>
           <div class="row">
             <button id="start-scan">اسکن با دوربین</button>
-            <button id="stop-scan" class="secondary" hidden>توقف اسکن</button>
+            <button id="stop-scan" class="secondary" hidden>توقف دوربین</button>
           </div>
           <p id="scanner-note" class="hint"></p>
-          <textarea id="paste-invite" class="mono" rows="4" placeholder="یا متن دعوت را اینجا بچسبانید"></textarea>
-          <button id="add-peer">افزودن و اتصال</button>
+          <textarea id="paste-invite" class="mono" rows="3" placeholder="یا متن دعوت همتا را اینجا بچسبانید"></textarea>
+          <button id="add-peer">افزودن همتا و اتصال</button>
         </div>
-      </section>
-      <section id="tab-peers" class="panel">
+
+        <!-- Known peers list -->
         <div class="card">
-          <h2>همتاهای شناخته‌شده</h2>
+          <h2>فهرست همتاهای شبکه مش (<span id="peers-total-count">۰</span>)</h2>
           <ul id="peer-list" class="list"></ul>
         </div>
       </section>
-      <section id="tab-messages" class="panel">
-        <div class="card">
-          <h2>ارسال پیام</h2>
-          <label>گیرنده</label>
-          <select id="message-recipient"></select>
-          <label>متن پیام</label>
-          <textarea id="message-body" rows="3" placeholder="سلام…"></textarea>
-          <button id="send-message">ارسال</button>
+
+      <!-- TAB 3: Easy Step-by-Step Visual Guide (راهنمای آسان برای همه) -->
+      <section id="tab-guide" class="panel">
+        <div class="guide-header card">
+          <h2>راهنمای ساده: پیام‌رسان بدون سرور چگونه کار می‌کند؟</h2>
+          <p class="hint">
+            این برنامه طوری ساخته شده که بدون نیاز به شرکت‌ها، بدون سرور مرکزی و حتی در زمان قطعی کامل اینترنت کار کند.
+          </p>
         </div>
-        <div class="card">
-          <h2>تاریخچه</h2>
-          <ul id="message-list" class="list"></ul>
+
+        <div class="guide-cards">
+          <!-- Step 1 -->
+          <div class="guide-card">
+            <div class="guide-card-icon">📱</div>
+            <div class="guide-card-content">
+              <h3>۱. همیشه و همه جا باز می‌شود (حتی آفلاین)</h3>
+              <p>
+                این سایت به صورت <strong>برنامه ذخیره‌شده (PWA)</strong> روی گوشی شما می‌ماند. حتی اگر اینترنت را کلاً خاموش کنید یا روی حالت هواپیما بگذارید، برنامه بلافاصله باز می‌شود و تمام پیام‌های قبلی شما امن در گوشیتان می‌ماند.
+              </p>
+            </div>
+          </div>
+
+          <!-- Step 2 -->
+          <div class="guide-card">
+            <div class="guide-card-icon">📷</div>
+            <div class="guide-card-content">
+              <h3>۲. اتصال در ۲ ثانیه بدون ثبت‌نام و شماره تلفن</h3>
+              <p>
+                نیازی به ثبت‌نام، رمز عبور یا شماره موبایل نیست! هر گوشی یک کلید خصوصی امن دارد. فقط کافیست در تب <strong>«همتاها»</strong>، دوربین را جلوی بارکد دوستتان بگیرید تا مستقیماً به هم متصل شوید.
+              </p>
+            </div>
+          </div>
+
+          <!-- Step 3 -->
+          <div class="guide-card">
+            <div class="guide-card-icon">🤝</div>
+            <div class="guide-card-content">
+              <h3>۳. پیام‌رسانی دست‌به‌دست (شبکه مش)</h3>
+              <p>
+                فرض کنید شما به <em>علی</em> وصل هستید و علی به <em>رضا</em> وصل است. اگر شما به رضا پیام بدهید، پیام خودکار از گوشی علی عبور می‌کند و به رضا می‌رسد، <strong>بدون اینکه علی بتواند متن پیام شما را بخواند</strong> (پیام‌ها قفل و رمزگذاری شده‌اند).
+              </p>
+            </div>
+          </div>
+
+          <!-- Step 4 -->
+          <div class="guide-card">
+            <div class="guide-card-icon">⛓️</div>
+            <div class="guide-card-content">
+              <h3>۴. سیستم بلاکچینی یعنی چه؟</h3>
+              <p>
+                هر پیامی که می‌فرستید مانند یک صفحه از یک <strong>دفترچهٔ قفل‌دار و ممهور</strong> ثبت می‌شود. شماره بلاک و امضای ریاضی پیام تضمین می‌کند که <strong>هیچ شخص یا سروری نمی‌تواند پیام را پاک کند، تغییر دهد یا پیام جعلی بسازد</strong>.
+              </p>
+            </div>
+          </div>
+
+          <!-- Step 5 -->
+          <div class="guide-card">
+            <div class="guide-card-icon">📶</div>
+            <div class="guide-card-content">
+              <h3>۵. اگر اینترنت کلاً قطع شد چه کنیم؟</h3>
+              <p>
+                کافی است یکی از دوستانتان <strong>نقطه اتصال (هات‌اسپات)</strong> گوشیش را روشن کند یا همه به یک مودم وای‌فای (حتی بدون بسته اینترنت) وصل شوید. سپس در تب همتاها دکمه <strong>«اتصال مستقیم و آفلاین»</strong> را بزنید تا بدون نیاز به هیچ سروری گفتگو کنید!
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="text-align: center;">
+          <button id="guide-go-to-chat" class="btn-large">ورود به محیط پیام‌رسان 💬</button>
         </div>
       </section>
+
+      <!-- TAB 4: Identity & Multi-Relay Settings -->
+      <section id="tab-identity" class="panel">
+        <div class="card">
+          <h2>هویت رمزنگاری محلی (ECDSA P-256)</h2>
+          <label>شناسه همتای شما (Peer ID)</label>
+          <code id="self-peer-id" class="mono block">—</code>
+
+          <label>نام مستعار نمایشی (اختیاری)</label>
+          <input id="user-alias" type="text" placeholder="مثلاً: محمد یا کاربر مش" />
+
+          <label>سرور(های) سیگنالینگ (برای اتصال از راه دور)</label>
+          <p class="hint">می‌توانید چند سرور را با کاما جدا کنید تا در صورت قطعی یکی، از بعدی استفاده شود.</p>
+          <input id="relay-url" type="text" inputmode="url" placeholder="https://mesh.up.railway.app, http://192.168.1.5:8080" />
+
+          <div class="row">
+            <button id="save-relay" class="secondary">ذخیره تنظیمات</button>
+            <button id="regenerate-identity" class="danger">تولید هویت جدید (پاکسازی)</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 5: Blockchain Ledger & Logs -->
       <section id="tab-logs" class="panel">
         <div class="card">
-          <h2>گزارش رویدادها</h2>
+          <div class="card-header-with-badge">
+            <h2>دفترکل بلاکچینی (Blockchain Ledger)</h2>
+            <button id="audit-ledger-btn" class="secondary btn-sm">بررسی اعتبار کل زنجیره</button>
+          </div>
+          <div id="ledger-audit-result" class="audit-box">
+            <span>در حال بارگذاری وضعیت زنجیره…</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>گزارش رویدادهای زنده (مش و روتینگ)</h2>
           <pre id="log-output" class="mono log"></pre>
         </div>
       </section>
     </main>
+
+    <!-- Modal for Blockchain Block Inspector -->
+    <div id="block-modal" class="modal-backdrop" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>مشخصات بلاک در دفترکل ⛓️</h3>
+          <button id="close-block-modal" class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="info-row">
+            <span class="info-label">شماره بلاک (Height):</span>
+            <span id="modal-block-index" class="mono highlight">—</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">هش بلاک (SHA-256):</span>
+            <code id="modal-block-hash" class="mono block-code">—</code>
+          </div>
+          <div class="info-row">
+            <span class="info-label">هش بلاک قبلی (Previous Hash):</span>
+            <code id="modal-block-prev" class="mono block-code">—</code>
+          </div>
+          <div class="info-row">
+            <span class="info-label">شناسه فرستنده:</span>
+            <code id="modal-block-sender" class="mono block-code">—</code>
+          </div>
+          <div class="info-row">
+            <span class="info-label">گیرنده:</span>
+            <code id="modal-block-recipient" class="mono block-code">—</code>
+          </div>
+          <div class="info-row">
+            <span class="info-label">امضای دیجیتال (ECDSA):</span>
+            <code id="modal-block-sig" class="mono block-code">—</code>
+          </div>
+          <div class="info-row">
+            <span class="info-label">زمان ثبت:</span>
+            <span id="modal-block-time">—</span>
+          </div>
+          <div class="status-box status-ok" id="modal-block-verdict">
+            ✓ این بلاک از نظر ریاضی مهر و موم شده و تاریخچه آن غیرقابل تغییر است.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scripts -->
     <script type="module" src="./src/app.js"></script>
   </body>
 </html>

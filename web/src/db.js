@@ -1,10 +1,14 @@
 /**
- * Minimal promise wrapper over IndexedDB. Three stores: identity (single
- * record), peers (keyed by peerId) and messages (keyed by messageId).
+ * Minimal promise wrapper over IndexedDB.
+ * Stores:
+ * - identity: single local identity
+ * - peers: known mesh peers keyed by peerId
+ * - messages: chat messages keyed by messageId
+ * - ledger: immutable blockchain blocks keyed by blockHash
  */
 
 const DB_NAME = 'p2psecure';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const IDENTITY_KEY = 'local';
 
 let dbPromise = null;
@@ -13,7 +17,7 @@ function openDatabase() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
       if (!db.objectStoreNames.contains('identity')) {
         db.createObjectStore('identity');
@@ -24,6 +28,13 @@ function openDatabase() {
       if (!db.objectStoreNames.contains('messages')) {
         const messages = db.createObjectStore('messages', { keyPath: 'messageId' });
         messages.createIndex('createdAt', 'createdAt');
+      }
+      if (!db.objectStoreNames.contains('ledger')) {
+        const ledger = db.createObjectStore('ledger', { keyPath: 'blockHash' });
+        ledger.createIndex('index', 'index');
+        ledger.createIndex('timestamp', 'timestamp');
+        ledger.createIndex('senderId', 'senderId');
+        ledger.createIndex('recipientId', 'recipientId');
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -69,6 +80,18 @@ export const messageStore = {
   clear: () => run('messages', 'readwrite', (store) => store.clear()),
 };
 
+export const ledgerStore = {
+  get: (blockHash) => run('ledger', 'readonly', (store) => store.get(blockHash)),
+  all: () => run('ledger', 'readonly', (store) => store.getAll()),
+  put: (block) => run('ledger', 'readwrite', (store) => store.put(block)),
+  clear: () => run('ledger', 'readwrite', (store) => store.clear()),
+};
+
 export async function wipeEverything() {
-  await Promise.all([identityStore.clear(), peerStore.clear(), messageStore.clear()]);
+  await Promise.all([
+    identityStore.clear(),
+    peerStore.clear(),
+    messageStore.clear(),
+    ledgerStore.clear(),
+  ]);
 }

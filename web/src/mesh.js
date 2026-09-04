@@ -1,10 +1,12 @@
 /**
- * Mesh engine: gossip peer discovery, exponential-backoff reconnection and
- * store-and-forward message routing over WebRTC DataChannels.
+ * Mesh engine: gossip peer discovery, exponential-backoff reconnection,
+ * store-and-forward message routing, blockchain ledger sealing, and
+ * serverless air-gap direct connectivity over WebRTC DataChannels.
  */
 
 import { derivePeerId, randomId, signData, verifySignature } from './crypto.js';
-import { messageStore, peerStore } from './db.js';
+import { messageStore, peerStore, ledgerStore } from './db.js';
+import { createBlock, validateBlock, PUBLIC_CHANNEL } from './ledger.js';
 import { SignalingClient } from './signaling.js';
 import { WebRtcManager } from './webrtc.js';
 
@@ -133,7 +135,7 @@ export class MeshNode extends EventTarget {
     this.dispatchEvent(new CustomEvent('log', { detail: text }));
   }
 
-  // -- invites ---------------------------------------------------------
+  // -- invites & direct connect -----------------------------------------
 
   buildInvite() {
     return JSON.stringify({
@@ -146,10 +148,10 @@ export class MeshNode extends EventTarget {
 
   async acceptInvite(rawInvite) {
     const invite = JSON.parse(rawInvite);
-    if (!invite.peerId || !invite.publicKeyPem) throw new Error('invite missing fields');
+    if (!invite.peerId || !invite.publicKeyPem) throw new Error('فیلدهای دعوت ناقص است');
     const derived = await derivePeerId(invite.publicKeyPem);
-    if (derived !== invite.peerId) throw new Error('invite peerId does not match public key');
-    if (invite.peerId === this.identity.peerId) throw new Error('that is your own invite');
+    if (derived !== invite.peerId) throw new Error('شناسه همتا با کلید عمومی همخوانی ندارد');
+    if (invite.peerId === this.identity.peerId) throw new Error('این کد متعلق به خود شماست');
 
     const existing = await peerStore.get(invite.peerId);
     const record = existing
@@ -158,6 +160,30 @@ export class MeshNode extends EventTarget {
     await peerStore.put(record);
     this.#emitChange();
     await this.dialPeer(invite.peerId);
+    return record;
+  }
+
+  /**
+   * Adopt an air-gapped / serverless direct connection.
+   */
+  async adoptDirectPeer(remotePeer, connection, channel) {
+    const derived = await derivePeerId(remotePeer.publicKeyPem);
+    if (derived !== remotePeer.peerId) throw new Error('کلید عمومی با شناسه همتا همخوانی ندارد');
+
+    const existing = await peerStore.get(remotePeer.peerId);
+    const record = existing
+      ? { ...existing, publicKeyPem: remotePeer.publicKeyPem, source: 'AIR_GAP', status: 'CONNECTED', nextRetryAt: 0 }
+      : newPeerRecord(remotePeer, 'AIR_GAP');
+    record.status = 'CONNECTED';
+    record.lastConnected = Date.now();
+    record.lastSeen = Date.now();
+    await peerStore.put(record);
+
+    this.webrtc.adoptDirectSession(remotePeer.peerId, connection, channel);
+    this.#log(`اتصال مستقیم بدون سرور برقرار شد با ${remotePeer.peerId.slice(0, 8)}`);
+    await this.publishGossip(remotePeer.peerId);
+    await this.flushPending();
+    this.#emitChange();
     return record;
   }
 
@@ -173,7 +199,7 @@ export class MeshNode extends EventTarget {
       await this.webrtc.dial(peerId);
     } catch (error) {
       await this.#markFailure(peerId);
-      this.#log(`dial failed for ${peerId.slice(0, 8)}: ${error.message}`);
+      this.#log(`تلاش برای اتصال ناموفق بود ${peerId.slice(0, 8)}: ${error.message}`);
     }
   }
 
@@ -181,7 +207,6 @@ export class MeshNode extends EventTarget {
     const peers = await peerStore.all();
     for (const peer of selectReconnectCandidates(peers)) {
       if (this.webrtc.isBusy(peer.peerId)) continue;
-      // Reserve the slot before dialing so the next tick does not double-dial.
       await peerStore.put({
         ...peer,
         status: 'CONNECTING',
@@ -217,14 +242,14 @@ export class MeshNode extends EventTarget {
         lastSeen: Date.now(),
       });
     }
-    this.#log(`connected to ${peerId.slice(0, 8)}`);
+    this.#log(`متصل شد به ${peerId.slice(0, 8)}`);
     await this.publishGossip(peerId);
     await this.flushPending();
     this.#emitChange();
   }
 
   async #handleChannelClose(peerId) {
-    this.#log(`disconnected from ${peerId.slice(0, 8)}`);
+    this.#log(`قطع اتصال از ${peerId.slice(0, 8)}`);
     await this.#markFailure(peerId);
   }
 
@@ -262,45 +287,58 @@ export class MeshNode extends EventTarget {
       if (!existing) learned += 1;
       await peerStore.put(mergePeerRecord(existing, entry));
     }
-    if (learned > 0) this.#log(`gossip: learned ${learned} new peer(s)`);
+    if (learned > 0) this.#log(`همتا(های) جدید کشف شد: ${learned}`);
     this.#emitChange();
   }
 
-  // -- messaging -------------------------------------------------------
+  // -- messaging & blockchain ledger -----------------------------------
 
   async sendMessage(recipientId, payload) {
-    const messageId = randomId();
-    const signature = await signData(this.identity.privateKeyPem, [
-      messageId,
-      this.identity.peerId,
-      recipientId,
+    const isPublic = recipientId === PUBLIC_CHANNEL;
+    const targetRecipient = isPublic ? PUBLIC_CHANNEL : recipientId;
+
+    // Create a cryptographically sealed block in the local blockchain ledger
+    const block = await createBlock({
+      identity: this.identity,
+      recipientId: targetRecipient,
       payload,
-    ]);
+    });
+
     const record = {
-      messageId,
+      messageId: block.messageId,
+      blockHash: block.blockHash,
+      index: block.index,
+      previousHash: block.previousHash,
       senderId: this.identity.peerId,
-      recipientId,
+      recipientId: targetRecipient,
+      isPublic,
       hopCount: 0,
       ttl: DEFAULT_TTL,
       payload,
-      signature,
+      signature: block.signature,
       status: 'PENDING',
-      createdAt: Date.now(),
-      deliveredAt: null,
+      createdAt: block.timestamp,
+      deliveredAt: isPublic ? block.timestamp : null,
     };
     await messageStore.put(record);
-    this.seenMessageIds.add(messageId);
-    const routed = this.#route({
+    this.seenMessageIds.add(block.messageId);
+
+    const packet = {
       type: 'DATA_PAYLOAD',
-      messageId,
+      block,
+      messageId: block.messageId,
       senderId: this.identity.peerId,
-      recipientId,
+      recipientId: targetRecipient,
       ttl: DEFAULT_TTL,
       hopCount: 0,
       payload,
-      signature,
-    });
-    await messageStore.put({ ...record, status: routed ? 'SENT' : 'PENDING' });
+      signature: block.signature,
+      isPublic,
+    };
+
+    const routed = this.#route(packet);
+    const newStatus = isPublic ? 'DELIVERED' : (routed ? 'SENT' : 'PENDING');
+    await messageStore.put({ ...record, status: newStatus });
     this.#emitChange();
     return record;
   }
@@ -319,6 +357,18 @@ export class MeshNode extends EventTarget {
         hopCount: 0,
         payload: message.payload,
         signature: message.signature,
+        isPublic: Boolean(message.isPublic),
+        block: {
+          index: message.index,
+          previousHash: message.previousHash,
+          blockHash: message.blockHash,
+          timestamp: message.createdAt,
+          messageId: message.messageId,
+          senderId: message.senderId,
+          recipientId: message.recipientId,
+          payload: message.payload,
+          signature: message.signature,
+        },
       });
       if (routed) await messageStore.put({ ...message, status: 'SENT' });
     }
@@ -327,6 +377,9 @@ export class MeshNode extends EventTarget {
 
   /** Direct hop when possible, otherwise flood to a few random neighbours. */
   #route(packet, exceptPeerId = null) {
+    if (packet.recipientId === PUBLIC_CHANNEL || packet.isPublic) {
+      return this.webrtc.broadcast(packet, exceptPeerId) > 0;
+    }
     if (this.webrtc.isConnected(packet.recipientId)) {
       return this.webrtc.send(packet.recipientId, packet);
     }
@@ -361,37 +414,94 @@ export class MeshNode extends EventTarget {
   async #handleDataPayload(fromPeerId, packet) {
     if (!this.#remember(packet.messageId)) return;
 
+    const isPublic = packet.recipientId === PUBLIC_CHANNEL || packet.isPublic;
+
+    // 1. PUBLIC Mesh Channel broadcast message
+    if (isPublic) {
+      const sender = await peerStore.get(packet.senderId);
+      if (packet.block && sender) {
+        const check = await validateBlock(packet.block, sender.publicKeyPem);
+        if (!check.valid) {
+          this.#log(`بلاک عمومی رد شد: ${check.reason}`);
+          return;
+        }
+        await ledgerStore.put(packet.block);
+      }
+
+      await messageStore.put({
+        messageId: packet.messageId,
+        blockHash: packet.block ? packet.block.blockHash : null,
+        index: packet.block ? packet.block.index : null,
+        previousHash: packet.block ? packet.block.previousHash : null,
+        senderId: packet.senderId,
+        recipientId: PUBLIC_CHANNEL,
+        isPublic: true,
+        hopCount: packet.hopCount || 0,
+        ttl: packet.ttl || 0,
+        payload: packet.payload,
+        signature: packet.signature,
+        status: 'DELIVERED',
+        createdAt: packet.block ? packet.block.timestamp : Date.now(),
+        deliveredAt: Date.now(),
+      });
+
+      // Gossip / flood public message across the mesh
+      const ttl = (packet.ttl || 0) - 1;
+      if (ttl > 0) {
+        this.#route({ ...packet, ttl, hopCount: (packet.hopCount || 0) + 1 }, fromPeerId);
+      }
+      this.#log(`پیام عمومی از ${packet.senderId.slice(0, 8)}`);
+      this.#emitChange();
+      return;
+    }
+
+    // 2. Relay packet if recipient is someone else in the mesh
     if (packet.recipientId !== this.identity.peerId) {
       const ttl = (packet.ttl || 0) - 1;
       if (ttl <= 0) return;
       this.#route({ ...packet, ttl, hopCount: (packet.hopCount || 0) + 1 }, fromPeerId);
-      this.#log(`relayed ${packet.messageId.slice(0, 8)} (ttl ${ttl})`);
+      this.#log(`رله شد: ${packet.messageId.slice(0, 8)} (ttl ${ttl})`);
       return;
     }
 
+    // 3. Private message targeted directly to this node
     const sender = await peerStore.get(packet.senderId);
-    const valid = sender
-      ? await verifySignature(
-          sender.publicKeyPem,
-          [packet.messageId, packet.senderId, packet.recipientId, packet.payload],
-          packet.signature,
-        )
-      : false;
+    let valid = false;
+    if (packet.block && sender) {
+      const check = await validateBlock(packet.block, sender.publicKeyPem);
+      valid = check.valid;
+      if (valid) {
+        await ledgerStore.put(packet.block);
+      } else {
+        this.#log(`خطای بلاک: ${check.reason}`);
+      }
+    } else if (sender) {
+      valid = await verifySignature(
+        sender.publicKeyPem,
+        [packet.messageId, packet.senderId, packet.recipientId, packet.payload],
+        packet.signature,
+      );
+    }
+
     if (!valid) {
-      this.#log(`rejected ${packet.messageId.slice(0, 8)}: bad signature or unknown sender`);
+      this.#log(`رد پیام ${packet.messageId.slice(0, 8)}: امضا یا بلاک نامعتبر`);
       return;
     }
 
     await messageStore.put({
       messageId: packet.messageId,
+      blockHash: packet.block ? packet.block.blockHash : null,
+      index: packet.block ? packet.block.index : null,
+      previousHash: packet.block ? packet.block.previousHash : null,
       senderId: packet.senderId,
       recipientId: packet.recipientId,
+      isPublic: false,
       hopCount: packet.hopCount || 0,
       ttl: packet.ttl || 0,
       payload: packet.payload,
       signature: packet.signature,
       status: 'DELIVERED',
-      createdAt: Date.now(),
+      createdAt: packet.block ? packet.block.timestamp : Date.now(),
       deliveredAt: Date.now(),
     });
 
@@ -414,7 +524,7 @@ export class MeshNode extends EventTarget {
       },
       fromPeerId,
     );
-    this.#log(`delivered message from ${packet.senderId.slice(0, 8)}`);
+    this.#log(`پیام تحویل گرفته شد از ${packet.senderId.slice(0, 8)}`);
     this.#emitChange();
   }
 
@@ -439,7 +549,7 @@ export class MeshNode extends EventTarget {
     if (!valid) return;
 
     await messageStore.put({ ...message, status: 'DELIVERED', deliveredAt: packet.timestamp });
-    this.#log(`ACK for ${packet.messageId.slice(0, 8)}`);
+    this.#log(`تایید تحویل (ACK) برای ${packet.messageId.slice(0, 8)}`);
     this.#emitChange();
   }
 }

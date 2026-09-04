@@ -17,16 +17,18 @@ PWA (identity + IndexedDB + gossip/router)
 | --- | --- |
 | `server/signaling.py` | Ephemeral relay: TTL mailboxes, long polling, static host |
 | `server/test_signaling.py` | Relay unit + live HTTP tests |
-| `web/index.html`, `web/styles.css` | Persian RTL UI shell |
-| `web/src/crypto.js` | ECDSA P-256 identity, signing, `peerId` derivation |
-| `web/src/db.js` | IndexedDB stores: `identity`, `peers`, `messages` |
-| `web/src/signaling.js` | Long-polling signaling client |
-| `web/src/webrtc.js` | `RTCPeerConnection` + `mesh-data` channel per peer |
-| `web/src/mesh.js` | Gossip, reconnect backoff, routing, ACKs |
+| `web/index.html`, `web/styles.css` | Persian RTL UI shell (Modern Messenger, Easy Guide, Block Inspector) |
+| `web/src/crypto.js` | ECDSA P-256 identity, SHA-256, deflate compression, `peerId` derivation |
+| `web/src/ledger.js` | Blockchain hash-chain ledger, block sealing, cryptographic verification |
+| `web/src/direct-connect.js` | Air-gapped / Serverless direct WebRTC handshake via QR code offer/answer |
+| `web/src/db.js` | IndexedDB stores: `identity`, `peers`, `messages`, `ledger` |
+| `web/src/signaling.js` | Multi-relay failover long-polling signaling client |
+| `web/src/webrtc.js` | `RTCPeerConnection` + `mesh-data` channel + direct session adoption |
+| `web/src/mesh.js` | Gossip, reconnect backoff, store-and-forward routing, block sealing |
 | `web/src/qr.js` | Dependency-free QR encoder (byte mode, EC level L) |
 | `web/src/scanner.js` | Camera scanning via `BarcodeDetector` |
-| `web/src/app.js` | UI controller |
-| `web/sw.js`, `web/manifest.webmanifest` | PWA install + offline shell |
+| `web/src/app.js` | Messenger UI controller, modal inspector, air-gap coordinator |
+| `web/sw.js`, `web/manifest.webmanifest` | PWA offline shell cache (100% serverless capability) |
 
 No build step and no npm dependencies: the client is native ES modules served
 as-is.
@@ -94,6 +96,23 @@ suppressed by `messageId`.
 
 `DELIVERY_ACK` — signed over `(messageId, ackFrom, timestamp)` and routed back
 the same way, flipping the sender's message from `SENT` to `DELIVERED`.
+
+## Blockchain Ledger (دفترکل بلاکچینی)
+
+Every message is sealed as an immutable block in a cryptographic hash-chain:
+- **Block Hash**: `SHA-256(index | previousHash | timestamp | messageId | senderId | recipientId | payload)`
+- **Signature**: `ECDSA-P256(blockHash, senderId, recipientId)`
+- **Tamper-Evidence**: If any intermediary node or relay alters even a single character, the block hash check fails and the entire network rejects the block.
+- **Audit**: Nodes can verify the entire chain continuity from Genesis to the latest block.
+
+## 100% Serverless / Air-Gapped Direct Connect (اتصال مستقیم بدون سرور)
+
+When the main domain, Railway, or the wider internet is down or censored:
+1. Two phones on the same Wi-Fi or mobile hotspot can connect directly.
+2. Device A generates a direct Offer QR code.
+3. Device B scans it, automatically generates an Answer QR code.
+4. Device A scans the Answer QR code.
+5. Direct WebRTC DataChannel opens with **ZERO** server or domain interaction.
 
 ## Reconnect policy
 

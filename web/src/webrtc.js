@@ -67,6 +67,39 @@ export class WebRtcManager {
     for (const peerId of [...this.sessions.keys()]) this.close(peerId);
   }
 
+  /**
+   * Adopt an existing connection/channel established via direct air-gap / offline handshake.
+   */
+  adoptDirectSession(peerId, connection, channel) {
+    this.close(peerId);
+    const session = {
+      connection,
+      channel,
+      polite: this.selfId < peerId,
+      makingOffer: false,
+      ignoreOffer: false,
+    };
+    this.sessions.set(peerId, session);
+
+    connection.onconnectionstatechange = () => {
+      const state = connection.connectionState;
+      if (state === 'failed' || state === 'closed' || state === 'disconnected') {
+        this.sessions.delete(peerId);
+        try {
+          connection.close();
+        } catch (error) {
+          /* ignore */
+        }
+        this.onChannelClose?.(peerId);
+      }
+    };
+
+    this.#bindChannel(peerId, session, channel);
+    if (channel.readyState === 'open') {
+      this.onChannelOpen?.(peerId);
+    }
+  }
+
   #session(peerId) {
     const existing = this.sessions.get(peerId);
     if (existing) return existing;

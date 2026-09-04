@@ -98,3 +98,42 @@ export async function verifySignature(publicKeyPem, fields, signatureBase64) {
 export function randomId() {
   return crypto.randomUUID();
 }
+
+/** Computes hex-encoded SHA-256 hash. */
+export async function sha256Hex(textOrBytes) {
+  const bytes = typeof textOrBytes === 'string' ? encoder.encode(textOrBytes) : textOrBytes;
+  const hashBuffer = await crypto.subtle.digest('SHA-256', bytes);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Compress string for compact QR code representation. */
+export async function compressString(str) {
+  try {
+    if (typeof CompressionStream !== 'undefined') {
+      const stream = new Blob([new TextEncoder().encode(str)]).stream();
+      const compressedStream = stream.pipeThrough(new CompressionStream('deflate-raw'));
+      const buffer = await new Response(compressedStream).arrayBuffer();
+      return bytesToBase64(buffer);
+    }
+  } catch (err) {
+    /* fallback to uncompressed */
+  }
+  return btoa(unescape(encodeURIComponent(str)));
+}
+
+/** Decompress string from compact QR code representation. */
+export async function decompressString(base64) {
+  try {
+    if (typeof DecompressionStream !== 'undefined') {
+      const bytes = base64ToBytes(base64);
+      const stream = new Blob([bytes]).stream();
+      const decompressedStream = stream.pipeThrough(new DecompressionStream('deflate-raw'));
+      const buffer = await new Response(decompressedStream).arrayBuffer();
+      return new TextDecoder().decode(buffer);
+    }
+  } catch (err) {
+    /* fallback to uncompressed */
+  }
+  return decodeURIComponent(escape(atob(base64)));
+}

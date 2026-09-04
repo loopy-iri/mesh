@@ -1,5 +1,5 @@
-/* Minimal app-shell cache so the PWA installs and opens offline. */
-const CACHE = 'p2psecure-v1';
+/* Complete offline app-shell cache so the PWA opens and works 100% offline. */
+const CACHE = 'p2psecure-v2';
 const SHELL = [
   './',
   './index.html',
@@ -8,6 +8,8 @@ const SHELL = [
   './icons/icon.svg',
   './src/app.js',
   './src/mesh.js',
+  './src/ledger.js',
+  './src/direct-connect.js',
   './src/crypto.js',
   './src/db.js',
   './src/qr.js',
@@ -17,7 +19,9 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches.open(CACHE).then((cache) => cache.addAll(SHELL)).then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', (event) => {
@@ -31,7 +35,7 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Never cache signaling traffic.
+  // Never cache live signaling polling or signaling send requests.
   if (event.request.method !== 'GET' || url.pathname.startsWith('/signal/')) return;
   event.respondWith(
     caches.match(event.request).then((hit) => hit || fetch(event.request).catch(() => caches.match('./index.html'))),
