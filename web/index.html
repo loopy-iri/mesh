@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b1120" />
+    <title>P2P Secure Mesh</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>شبکه مش امن</h1>
+      <span id="connection-summary" class="pill">در حال بارگذاری…</span>
+    </header>
+    <nav class="tabs">
+      <button class="tab active" data-tab="identity">هویت</button>
+      <button class="tab" data-tab="peers">همتاها</button>
+      <button class="tab" data-tab="messages">پیام‌ها</button>
+      <button class="tab" data-tab="logs">گزارش</button>
+    </nav>
+    <main>
+      <section id="tab-identity" class="panel active">
+        <div class="card">
+          <h2>هویت محلی</h2>
+          <label>شناسه همتا (Peer ID)</label>
+          <code id="self-peer-id" class="mono block">—</code>
+          <label>سرور سیگنالینگ</label>
+          <input id="relay-url" type="url" inputmode="url" placeholder="https://example.org" />
+          <div class="row">
+            <button id="save-relay" class="secondary">ذخیره سرور</button>
+            <button id="regenerate-identity" class="danger">تولید هویت جدید</button>
+          </div>
+        </div>
+        <div class="card">
+          <h2>دعوت‌نامه من</h2>
+          <p class="hint">این کد را برای همتای مقابل اسکن کنید.</p>
+          <canvas id="invite-qr" class="qr"></canvas>
+          <textarea id="invite-text" class="mono" rows="4" readonly></textarea>
+          <button id="copy-invite" class="secondary">کپی متن دعوت</button>
+        </div>
+        <div class="card">
+          <h2>افزودن همتا</h2>
+          <video id="scanner-video" playsinline muted hidden></video>
+          <div class="row">
+            <button id="start-scan">اسکن با دوربین</button>
+            <button id="stop-scan" class="secondary" hidden>توقف اسکن</button>
+          </div>
+          <p id="scanner-note" class="hint"></p>
+          <textarea id="paste-invite" class="mono" rows="4" placeholder="یا متن دعوت را اینجا بچسبانید"></textarea>
+          <button id="add-peer">افزودن و اتصال</button>
+        </div>
+      </section>
+      <section id="tab-peers" class="panel">
+        <div class="card">
+          <h2>همتاهای شناخته‌شده</h2>
+          <ul id="peer-list" class="list"></ul>
+        </div>
+      </section>
+      <section id="tab-messages" class="panel">
+        <div class="card">
+          <h2>ارسال پیام</h2>
+          <label>گیرنده</label>
+          <select id="message-recipient"></select>
+          <label>متن پیام</label>
+          <textarea id="message-body" rows="3" placeholder="سلام…"></textarea>
+          <button id="send-message">ارسال</button>
+        </div>
+        <div class="card">
+          <h2>تاریخچه</h2>
+          <ul id="message-list" class="list"></ul>
+        </div>
+      </section>
+      <section id="tab-logs" class="panel">
+        <div class="card">
+          <h2>گزارش رویدادها</h2>
+          <pre id="log-output" class="mono log"></pre>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./src/app.js"></script>
+  </body>
+</html>

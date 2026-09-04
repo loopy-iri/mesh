@@ -1,0 +1,14 @@
+{
+  "name": "P2P Secure Mesh",
+  "short_name": "P2PSecure",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b1120",
+  "theme_color": "#0b1120",
+  "lang": "fa",
+  "dir": "rtl",
+  "icons": [
+    { "src": "./icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

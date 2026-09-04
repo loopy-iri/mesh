@@ -1,0 +1,16 @@
+.git
+.gitignore
+.dockerignore
+__pycache__
+*.py[cod]
+*$py.class
+*.exe
+cloudflared.exe
+.env
+.venv
+venv/
+env/
+.idea/
+.vscode/
+*.md
+!README.md
