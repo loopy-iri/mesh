@@ -1,11 +1,11 @@
 /**
  * Mesh engine: gossip peer discovery, exponential-backoff reconnection,
- * store-and-forward message routing, blockchain ledger sealing, and
- * serverless air-gap direct connectivity over WebRTC DataChannels.
+ * store-and-forward message routing, blockchain ledger sealing, serverless air-gap,
+ * and decentralized connection descriptor & service directory synchronization.
  */
 
-import { derivePeerId, randomId, signData, verifySignature } from './crypto.js';
-import { messageStore, peerStore, ledgerStore } from './db.js';
+import { derivePeerId, randomId, signData, verifySignature, signDescriptor, verifyDescriptorSignature } from './crypto.js';
+import { messageStore, peerStore, ledgerStore, serviceStore } from './db.js';
 import { createBlock, validateBlock, PUBLIC_CHANNEL } from './ledger.js';
 import { SignalingClient } from './signaling.js';
 import { WebRtcManager } from './webrtc.js';
@@ -25,12 +25,17 @@ export function backoffDelay(failureCount, random = Math.random) {
 }
 
 export function newPeerRecord(peer, source) {
+  const relays = Array.isArray(peer.relayUrls)
+    ? peer.relayUrls
+    : (peer.relayUrl ? [peer.relayUrl] : []);
+
   return {
     peerId: peer.peerId,
     publicKeyPem: peer.publicKeyPem,
     alias: peer.alias || '',
     source,
-    signalingToken: peer.signalingToken || peer.peerId,
+    relayUrls: relays,
+    descriptorSignature: peer.descriptorSignature || peer.signature || null,
     sequence: peer.sequence || 1,
     lastSeen: Date.now(),
     lastConnected: null,
@@ -43,13 +48,19 @@ export function newPeerRecord(peer, source) {
 /** Merge an incoming gossip entry; only strictly newer sequences win. */
 export function mergePeerRecord(existing, incoming) {
   if (!existing) return newPeerRecord(incoming, 'GOSSIP');
-  if ((incoming.sequence || 0) <= existing.sequence) {
+  if ((incoming.sequence || 0) <= (existing.sequence || 0)) {
     return { ...existing, lastSeen: Date.now() };
   }
+  const incomingRelays = Array.isArray(incoming.relayUrls)
+    ? incoming.relayUrls
+    : (incoming.relayUrl ? [incoming.relayUrl] : (existing.relayUrls || []));
+
   return {
     ...existing,
     publicKeyPem: incoming.publicKeyPem || existing.publicKeyPem,
-    signalingToken: incoming.signalingToken || existing.signalingToken,
+    relayUrls: incomingRelays,
+    alias: incoming.alias !== undefined ? incoming.alias : existing.alias,
+    descriptorSignature: incoming.descriptorSignature || incoming.signature || existing.descriptorSignature,
     sequence: incoming.sequence,
     lastSeen: Date.now(),
   };
@@ -63,15 +74,22 @@ export function selectReconnectCandidates(peers, now = Date.now()) {
 }
 
 export class MeshNode extends EventTarget {
-  constructor(identity, relayUrl) {
+  constructor(identity, relayUrls) {
     super();
     this.identity = identity;
-    this.relayUrl = relayUrl;
-    this.sequence = 1;
+
+    const rawList = typeof relayUrls === 'string' ? relayUrls.split(/[,\s]+/) : (relayUrls || []);
+    this.relayUrls = rawList.map((u) => u.trim()).filter(Boolean);
+    if (this.relayUrls.length === 0) this.relayUrls = [window.location.origin];
+
+    const storedSeq = parseInt(localStorage.getItem('p2psecure.descriptorSeq') || '1', 10);
+    this.sequence = isNaN(storedSeq) ? 1 : storedSeq;
+    this.alias = localStorage.getItem('p2psecure.userAlias') || '';
+
     this.seenMessageIds = new Set();
     this.timers = [];
 
-    this.signaling = new SignalingClient(relayUrl, identity.peerId, (senderId, signal) =>
+    this.signaling = new SignalingClient(this.relayUrls, identity.peerId, (senderId, signal) =>
       this.webrtc.handleSignal(senderId, signal),
     );
     this.webrtc = new WebRtcManager({
@@ -88,8 +106,11 @@ export class MeshNode extends EventTarget {
   async start() {
     this.signaling.start();
     await this.#resetPeerStatuses();
+    await this.#loadStoredServices();
+
     this.timers.push(setInterval(() => this.publishGossip(), GOSSIP_INTERVAL_MS));
     this.timers.push(setInterval(() => this.runReconnectPass(), RECONNECT_TICK_MS));
+
     this.onlineHandler = () => this.wakeUp();
     this.visibilityHandler = () => {
       if (document.visibilityState === 'visible') this.wakeUp();
@@ -108,7 +129,6 @@ export class MeshNode extends EventTarget {
     this.webrtc.closeAll();
   }
 
-  /** Clear backoff so a returning-to-foreground / back-online app retries fast. */
   async wakeUp() {
     const peers = await peerStore.all();
     await Promise.all(
@@ -127,6 +147,14 @@ export class MeshNode extends EventTarget {
     );
   }
 
+  async #loadStoredServices() {
+    const services = await serviceStore.all();
+    const urls = services.map((s) => s.url).filter(Boolean);
+    if (urls.length > 0) {
+      this.signaling.addDiscoveredRelays(urls);
+    }
+  }
+
   #emitChange() {
     this.dispatchEvent(new CustomEvent('change'));
   }
@@ -135,14 +163,64 @@ export class MeshNode extends EventTarget {
     this.dispatchEvent(new CustomEvent('log', { detail: text }));
   }
 
-  // -- invites & direct connect -----------------------------------------
+  // -- connection descriptors & invites ---------------------------------
+
+  async buildDescriptor() {
+    const desc = {
+      peerId: this.identity.peerId,
+      publicKeyPem: this.identity.publicKeyPem,
+      sequence: this.sequence,
+      relayUrls: this.relayUrls,
+      alias: this.alias,
+      timestamp: Date.now(),
+    };
+    desc.signature = await signDescriptor(this.identity.privateKeyPem, desc);
+    return desc;
+  }
+
+  /**
+   * Update local connection details (new relays or alias), increment sequence,
+   * sign descriptor, and broadcast to the mesh so all peers sync the new info!
+   */
+  async updateConnectionDetails({ relayUrls = null, alias = null }) {
+    this.sequence += 1;
+    localStorage.setItem('p2psecure.descriptorSeq', String(this.sequence));
+
+    if (relayUrls !== null) {
+      const raw = typeof relayUrls === 'string' ? relayUrls.split(/[,\s]+/) : relayUrls;
+      this.relayUrls = raw.map((u) => u.trim()).filter(Boolean);
+      this.signaling.addDiscoveredRelays(this.relayUrls);
+    }
+
+    if (alias !== null) {
+      this.alias = alias.trim();
+      localStorage.setItem('p2psecure.userAlias', this.alias);
+    }
+
+    const descriptor = await this.buildDescriptor();
+    this.#log(`مشخصات اتصال محلی به نسخه v${this.sequence} ارتقا یافت و در مش منتشر شد.`);
+
+    // Broadcast immediate descriptor update to all connected peers
+    const packet = {
+      type: 'DESCRIPTOR_UPDATE',
+      senderId: this.identity.peerId,
+      descriptor,
+      relays: this.signaling.baseUrls,
+    };
+    this.webrtc.broadcast(packet);
+
+    this.#emitChange();
+    return descriptor;
+  }
 
   buildInvite() {
     return JSON.stringify({
-      v: 1,
+      v: 2,
       peerId: this.identity.peerId,
       publicKeyPem: this.identity.publicKeyPem,
-      relayUrl: this.relayUrl,
+      sequence: this.sequence,
+      relayUrls: this.relayUrls,
+      alias: this.alias,
     });
   }
 
@@ -155,17 +233,19 @@ export class MeshNode extends EventTarget {
 
     const existing = await peerStore.get(invite.peerId);
     const record = existing
-      ? { ...existing, publicKeyPem: invite.publicKeyPem, source: 'MANUAL_QR', nextRetryAt: 0 }
+      ? mergePeerRecord(existing, { ...invite, source: 'MANUAL_QR', nextRetryAt: 0 })
       : newPeerRecord(invite, 'MANUAL_QR');
+
     await peerStore.put(record);
+    if (invite.relayUrls) {
+      this.signaling.addDiscoveredRelays(invite.relayUrls);
+    }
+
     this.#emitChange();
     await this.dialPeer(invite.peerId);
     return record;
   }
 
-  /**
-   * Adopt an air-gapped / serverless direct connection.
-   */
   async adoptDirectPeer(remotePeer, connection, channel) {
     const derived = await derivePeerId(remotePeer.publicKeyPem);
     if (derived !== remotePeer.peerId) throw new Error('کلید عمومی با شناسه همتا همخوانی ندارد');
@@ -193,10 +273,12 @@ export class MeshNode extends EventTarget {
     if (this.webrtc.isBusy(peerId)) return;
     const peer = await peerStore.get(peerId);
     if (!peer) return;
+
     await peerStore.put({ ...peer, status: 'CONNECTING' });
     this.#emitChange();
     try {
-      await this.webrtc.dial(peerId);
+      // Pass peer's advertised relays to WebRTC manager
+      await this.webrtc.dial(peerId, peer.relayUrls);
     } catch (error) {
       await this.#markFailure(peerId);
       this.#log(`تلاش برای اتصال ناموفق بود ${peerId.slice(0, 8)}: ${error.message}`);
@@ -212,7 +294,7 @@ export class MeshNode extends EventTarget {
         status: 'CONNECTING',
         nextRetryAt: Date.now() + backoffDelay(peer.failureCount + 1),
       });
-      this.webrtc.dial(peer.peerId).catch(() => this.#markFailure(peer.peerId));
+      this.webrtc.dial(peer.peerId, peer.relayUrls).catch(() => this.#markFailure(peer.peerId));
     }
     this.#emitChange();
   }
@@ -253,42 +335,119 @@ export class MeshNode extends EventTarget {
     await this.#markFailure(peerId);
   }
 
-  // -- gossip ----------------------------------------------------------
+  // -- gossip & decentralized service sync ------------------------------
 
   async publishGossip(targetPeerId = null) {
     const peers = await peerStore.all();
-    const entries = [
-      {
-        peerId: this.identity.peerId,
-        publicKeyPem: this.identity.publicKeyPem,
-        sequence: this.sequence,
-        signalingToken: this.identity.peerId,
-      },
-      ...peers.map((peer) => ({
-        peerId: peer.peerId,
-        publicKeyPem: peer.publicKeyPem,
-        sequence: peer.sequence,
-        signalingToken: peer.signalingToken,
-      })),
-    ];
-    const packet = { type: 'PEER_EXCHANGE', senderId: this.identity.peerId, peers: entries };
+    const myDescriptor = await this.buildDescriptor();
+
+    const peerDescriptors = peers.map((peer) => ({
+      peerId: peer.peerId,
+      publicKeyPem: peer.publicKeyPem,
+      alias: peer.alias,
+      sequence: peer.sequence,
+      relayUrls: peer.relayUrls,
+      descriptorSignature: peer.descriptorSignature,
+    }));
+
+    const packet = {
+      type: 'PEER_EXCHANGE',
+      senderId: this.identity.peerId,
+      senderDescriptor: myDescriptor,
+      peers: [myDescriptor, ...peerDescriptors],
+      relays: this.signaling.baseUrls,
+    };
+
     if (targetPeerId) this.webrtc.send(targetPeerId, packet);
     else this.webrtc.broadcast(packet);
-    this.sequence += 1;
   }
 
   async #handlePeerExchange(packet) {
+    // 1. Sync discovered community relays / services
+    if (Array.isArray(packet.relays) && packet.relays.length > 0) {
+      const added = this.signaling.addDiscoveredRelays(packet.relays);
+      if (added > 0) {
+        this.#log(`سینک سرویس‌ها: ${added} رله جدید از مش کشف و ثبت شد.`);
+        for (const url of packet.relays) {
+          if (url) await serviceStore.put({ url, discoveredAt: Date.now() });
+        }
+      }
+    }
+
+    // 2. Sync peer connection descriptors
     let learned = 0;
+    let updated = 0;
+
     for (const entry of packet.peers || []) {
       if (!entry.peerId || entry.peerId === this.identity.peerId) continue;
       if (!entry.publicKeyPem) continue;
       if ((await derivePeerId(entry.publicKeyPem)) !== entry.peerId) continue;
+
+      // Verify descriptor signature if present
+      if (entry.signature) {
+        const sigValid = await verifyDescriptorSignature(entry.publicKeyPem, entry);
+        if (!sigValid) {
+          continue; // skip unverified forged descriptor
+        }
+      }
+
       const existing = await peerStore.get(entry.peerId);
-      if (!existing) learned += 1;
-      await peerStore.put(mergePeerRecord(existing, entry));
+      if (!existing) {
+        learned += 1;
+        await peerStore.put(newPeerRecord(entry, 'GOSSIP'));
+      } else if ((entry.sequence || 0) > (existing.sequence || 0)) {
+        updated += 1;
+        const oldRelays = (existing.relayUrls || []).join(',');
+        const newRelays = (entry.relayUrls || []).join(',');
+
+        await peerStore.put(mergePeerRecord(existing, entry));
+
+        if (oldRelays !== newRelays) {
+          this.#log(`مشخصات اتصال ${entry.peerId.slice(0, 8)} از بقیه سینک شد (نسخه v${entry.sequence}). رله‌های جدید: ${newRelays || 'پیش‌فرض'}`);
+          // Re-dial using the freshly synced relay endpoint if disconnected
+          if (existing.status !== 'CONNECTED') {
+            this.dialPeer(entry.peerId);
+          }
+        }
+      }
     }
-    if (learned > 0) this.#log(`همتا(های) جدید کشف شد: ${learned}`);
-    this.#emitChange();
+
+    if (learned > 0 || updated > 0) {
+      if (learned > 0) this.#log(`همتا(های) جدید کشف شد: ${learned}`);
+      this.#emitChange();
+    }
+  }
+
+  async #handleDescriptorUpdate(packet) {
+    const desc = packet.descriptor;
+    if (!desc || !desc.peerId || desc.peerId === this.identity.peerId) return;
+
+    const existing = await peerStore.get(desc.peerId);
+    if (!existing) return;
+
+    // Verify signature
+    const valid = await verifyDescriptorSignature(existing.publicKeyPem, desc);
+    if (!valid) {
+      this.#log(`رد بروزرسانی مشخصات ${desc.peerId.slice(0, 8)}: امضای نامعتبر`);
+      return;
+    }
+
+    if ((desc.sequence || 0) > (existing.sequence || 0)) {
+      const merged = mergePeerRecord(existing, desc);
+      await peerStore.put(merged);
+
+      const relayText = (desc.relayUrls || []).join(', ');
+      this.#log(`سینک مشخصات اتصال جدید برای ${desc.peerId.slice(0, 8)} (v${desc.sequence}). رله: ${relayText}`);
+
+      // Re-gossip update to other neighbors
+      this.webrtc.broadcast(packet, existing.peerId);
+
+      // Attempt immediate reconnection to new relay if not connected
+      if (existing.status !== 'CONNECTED') {
+        this.dialPeer(desc.peerId);
+      }
+      this.#emitChange();
+    }
   }
 
   // -- messaging & blockchain ledger -----------------------------------
@@ -297,7 +456,6 @@ export class MeshNode extends EventTarget {
     const isPublic = recipientId === PUBLIC_CHANNEL;
     const targetRecipient = isPublic ? PUBLIC_CHANNEL : recipientId;
 
-    // Create a cryptographically sealed block in the local blockchain ledger
     const block = await createBlock({
       identity: this.identity,
       recipientId: targetRecipient,
@@ -343,7 +501,6 @@ export class MeshNode extends EventTarget {
     return record;
   }
 
-  /** Re-route messages that never found a next hop when first sent. */
   async flushPending() {
     const messages = await messageStore.all();
     for (const message of messages) {
@@ -375,7 +532,6 @@ export class MeshNode extends EventTarget {
     this.#emitChange();
   }
 
-  /** Direct hop when possible, otherwise flood to a few random neighbours. */
   #route(packet, exceptPeerId = null) {
     if (packet.recipientId === PUBLIC_CHANNEL || packet.isPublic) {
       return this.webrtc.broadcast(packet, exceptPeerId) > 0;
@@ -406,6 +562,7 @@ export class MeshNode extends EventTarget {
 
   async #handlePacket(fromPeerId, packet) {
     if (packet.type === 'PEER_EXCHANGE') return this.#handlePeerExchange(packet);
+    if (packet.type === 'DESCRIPTOR_UPDATE') return this.#handleDescriptorUpdate(packet);
     if (packet.type === 'DATA_PAYLOAD') return this.#handleDataPayload(fromPeerId, packet);
     if (packet.type === 'DELIVERY_ACK') return this.#handleAck(packet);
     return undefined;
@@ -445,7 +602,6 @@ export class MeshNode extends EventTarget {
         deliveredAt: Date.now(),
       });
 
-      // Gossip / flood public message across the mesh
       const ttl = (packet.ttl || 0) - 1;
       if (ttl > 0) {
         this.#route({ ...packet, ttl, hopCount: (packet.hopCount || 0) + 1 }, fromPeerId);

@@ -137,3 +137,27 @@ export async function decompressString(base64) {
   }
   return decodeURIComponent(escape(atob(base64)));
 }
+
+/** Canonical fields for signing a peer connection descriptor. */
+export function descriptorFields(desc) {
+  const relayStr = Array.isArray(desc.relayUrls) ? desc.relayUrls.join(',') : (desc.relayUrls || '');
+  return [
+    desc.peerId,
+    desc.sequence || 1,
+    relayStr,
+    desc.alias || '',
+    desc.timestamp || 0,
+  ];
+}
+
+/** Signs a peer connection descriptor with the peer's private key. */
+export async function signDescriptor(privateKeyPem, descriptor) {
+  return signData(privateKeyPem, descriptorFields(descriptor));
+}
+
+/** Verifies a peer connection descriptor against the peer's public key. */
+export async function verifyDescriptorSignature(publicKeyPem, descriptor) {
+  if (!descriptor || !descriptor.signature) return false;
+  return verifySignature(publicKeyPem, descriptorFields(descriptor), descriptor.signature);
+}
+

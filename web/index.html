@@ -179,6 +179,18 @@
           <h2>فهرست همتاهای شبکه مش (<span id="peers-total-count">۰</span>)</h2>
           <ul id="peer-list" class="list"></ul>
         </div>
+
+        <!-- Decentralized Shared Services / Relays Pool -->
+        <div class="card">
+          <div class="card-header-with-badge">
+            <h2>سرویس‌ها و رله‌های همگام‌شده در مش</h2>
+            <span id="service-count-pill" class="badge">۱ فعال</span>
+          </div>
+          <p class="hint">
+            این رله‌ها به صورت غیرمتمرکز از سایر همتاها سینک شده‌اند تا در صورت قطعی یک سرور، شبکه از کار نیفتد.
+          </p>
+          <ul id="services-list" class="list"></ul>
+        </div>
       </section>
 
       <!-- TAB 3: Easy Step-by-Step Visual Guide (راهنمای آسان برای همه) -->
@@ -255,18 +267,26 @@
       <!-- TAB 4: Identity & Multi-Relay Settings -->
       <section id="tab-identity" class="panel">
         <div class="card">
-          <h2>هویت رمزنگاری محلی (ECDSA P-256)</h2>
+          <div class="card-header-with-badge">
+            <h2>هویت رمزنگاری محلی (ECDSA P-256)</h2>
+            <span id="descriptor-version-pill" class="tag tag-ok">نسخه شناسنامه: v1</span>
+          </div>
+
           <label>شناسه همتای شما (Peer ID)</label>
           <code id="self-peer-id" class="mono block">—</code>
 
-          <label>نام مستعار نمایشی (اختیاری)</label>
-          <input id="user-alias" type="text" placeholder="مثلاً: محمد یا کاربر مش" />
+          <label>نام مستعار نمایشی در شبکه</label>
+          <input id="user-alias" type="text" placeholder="مثلاً: محمد یا نود محله" />
 
-          <label>سرور(های) سیگنالینگ (برای اتصال از راه دور)</label>
-          <p class="hint">می‌توانید چند سرور را با کاما جدا کنید تا در صورت قطعی یکی، از بعدی استفاده شود.</p>
+          <label>سرور(های) رله اتصال شما (آدرس سرور Railway یا آی‌پی محلی)</label>
+          <p class="hint">اگر دامنه یا رله خود را عوض کنید، با زدن دکمه زیر، مشخصات جدید به طور خودکار به گوش بقیه نودها می‌رسد و سینک می‌شود.</p>
           <input id="relay-url" type="text" inputmode="url" placeholder="https://mesh.up.railway.app, http://192.168.1.5:8080" />
 
-          <div class="row">
+          <button id="broadcast-descriptor" class="btn-large" style="margin-top: 0.9rem;">
+            📡 انتشار و سینک مشخصات اتصال در کل مش
+          </button>
+
+          <div class="row" style="margin-top: 0.6rem;">
             <button id="save-relay" class="secondary">ذخیره تنظیمات</button>
             <button id="regenerate-identity" class="danger">تولید هویت جدید (پاکسازی)</button>
           </div>

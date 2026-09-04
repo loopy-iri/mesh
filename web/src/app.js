@@ -456,13 +456,17 @@ async function renderPeers() {
       ? '⚡ مستقیم بدون سرور'
       : (peer.source === 'MANUAL_QR' ? 'اسکن بارکد' : 'کشف خودکار مش');
 
+    const relaysText = (peer.relayUrls && peer.relayUrls.length > 0)
+      ? peer.relayUrls.join(', ')
+      : 'رله پیش‌فرض';
+
     item.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <span class="mono" style="font-weight: 600;">${peer.alias ? `${peer.alias} (${shorten(peer.peerId)})` : shorten(peer.peerId)}</span>
         <span class="status-${peer.status}">${peer.status === 'CONNECTED' ? 'متصل ✓' : 'قطع'}</span>
       </div>
       <div class="meta" style="font-size: 0.75rem;">
-        منبع: ${sourceText} · توالی: ${peer.sequence} · خطاها: ${peer.failureCount}
+        منبع: ${sourceText} · نسخه: v${peer.sequence || 1} · رله‌های سینک‌شده: <span style="color: #60a5fa;">${relaysText}</span>
       </div>
       <div class="row" style="margin-top: 0.4rem;">
         <button class="secondary btn-sm" onclick="window.startChatWith('${peer.peerId}')">ارسال پیام در چت 💬</button>
@@ -474,6 +478,28 @@ async function renderPeers() {
   const connected = peers.filter((p) => p.status === 'CONNECTED').length;
   $('connection-summary').textContent = `${connected} متصل از ${peers.length} همتا`;
 }
+
+async function renderServices() {
+  const list = $('services-list');
+  if (!list || !node) return;
+  list.innerHTML = '';
+
+  const relays = node.signaling.baseUrls;
+  $('service-count-pill').textContent = `${relays.length} رله فعال`;
+
+  for (const url of relays) {
+    const item = document.createElement('li');
+    item.style.padding = '0.4rem 0';
+    item.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <span class="mono" style="color: #93c5fd; font-size: 0.8rem;">${url}</span>
+        <span class="badge" style="font-size: 0.7rem;">فعال در استخر</span>
+      </div>
+    `;
+    list.appendChild(item);
+  }
+}
+
 
 window.startChatWith = (peerId) => {
   const chatTab = document.querySelector('.tab[data-tab="chat"]');
@@ -533,6 +559,26 @@ function bindPeerControls() {
 function bindIdentityControls() {
   $('relay-url').value = relayUrls();
   $('user-alias').value = userAlias();
+  if ($('descriptor-version-pill') && node) {
+    $('descriptor-version-pill').textContent = `نسخه شناسنامه: v${node.sequence}`;
+  }
+
+  // Broadcast and sync updated connection details
+  const broadcastBtn = $('broadcast-descriptor');
+  if (broadcastBtn) {
+    broadcastBtn.addEventListener('click', async () => {
+      const relays = $('relay-url').value.trim();
+      const alias = $('user-alias').value.trim();
+      try {
+        const desc = await node.updateConnectionDetails({ relayUrls: relays, alias });
+        $('descriptor-version-pill').textContent = `نسخه شناسنامه: v${desc.sequence}`;
+        appendLog(`مشخصات جدید (نسخه v${desc.sequence}) با موفقیت به تمام همتاهای مش سینک شد.`);
+        await refreshAll();
+      } catch (err) {
+        appendLog(`خطای انتشار مشخصات: ${err.message}`);
+      }
+    });
+  }
 
   $('save-relay').addEventListener('click', () => {
     const relays = $('relay-url').value.trim();
@@ -572,7 +618,7 @@ function updateNetworkStatus() {
 }
 
 async function refreshAll() {
-  await Promise.all([renderConversations(), renderChatMessages(), renderPeers()]);
+  await Promise.all([renderConversations(), renderChatMessages(), renderPeers(), renderServices()]);
 }
 
 /* ==========================================================================
@@ -595,6 +641,9 @@ async function main() {
   renderInvite();
 
   await node.start();
+  if ($('descriptor-version-pill')) {
+    $('descriptor-version-pill').textContent = `نسخه شناسنامه: v${node.sequence}`;
+  }
   await refreshAll();
 
   // Audit ledger status on startup
@@ -602,6 +651,7 @@ async function main() {
   $('ledger-audit-result').innerHTML = audit.valid
     ? `<span class="status-ok">✓ زنجیره بلاکچین معتبر است (${audit.count} بلاک).</span>`
     : `<span style="color: #ef4444;">نقص در زنجیره: ${audit.errors[0]}</span>`;
+
 
   appendLog(`آماده به کار. رله‌های فعال: ${relayUrls()}`);
 

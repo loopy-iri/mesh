@@ -5,10 +5,11 @@
  * - peers: known mesh peers keyed by peerId
  * - messages: chat messages keyed by messageId
  * - ledger: immutable blockchain blocks keyed by blockHash
+ * - services: known signaling relays & network services keyed by url
  */
 
 const DB_NAME = 'p2psecure';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const IDENTITY_KEY = 'local';
 
 let dbPromise = null;
@@ -35,6 +36,9 @@ function openDatabase() {
         ledger.createIndex('timestamp', 'timestamp');
         ledger.createIndex('senderId', 'senderId');
         ledger.createIndex('recipientId', 'recipientId');
+      }
+      if (!db.objectStoreNames.contains('services')) {
+        db.createObjectStore('services', { keyPath: 'url' });
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -87,11 +91,20 @@ export const ledgerStore = {
   clear: () => run('ledger', 'readwrite', (store) => store.clear()),
 };
 
+export const serviceStore = {
+  get: (url) => run('services', 'readonly', (store) => store.get(url)),
+  all: () => run('services', 'readonly', (store) => store.getAll()),
+  put: (service) => run('services', 'readwrite', (store) => store.put(service)),
+  delete: (url) => run('services', 'readwrite', (store) => store.delete(url)),
+  clear: () => run('services', 'readwrite', (store) => store.clear()),
+};
+
 export async function wipeEverything() {
   await Promise.all([
     identityStore.clear(),
     peerStore.clear(),
     messageStore.clear(),
     ledgerStore.clear(),
+    serviceStore.clear(),
   ]);
 }

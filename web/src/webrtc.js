@@ -100,9 +100,12 @@ export class WebRtcManager {
     }
   }
 
-  #session(peerId) {
+  #session(peerId, targetRelayUrls = null) {
     const existing = this.sessions.get(peerId);
-    if (existing) return existing;
+    if (existing) {
+      if (targetRelayUrls) existing.targetRelayUrls = targetRelayUrls;
+      return existing;
+    }
 
     const connection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     const session = {
@@ -111,13 +114,14 @@ export class WebRtcManager {
       polite: this.selfId < peerId,
       makingOffer: false,
       ignoreOffer: false,
+      targetRelayUrls: targetRelayUrls,
     };
     this.sessions.set(peerId, session);
 
     connection.onicecandidate = ({ candidate }) => {
       if (!candidate) return;
       this.signaling
-        .send(peerId, { kind: 'ice', candidate: candidate.toJSON() })
+        .send(peerId, { kind: 'ice', candidate: candidate.toJSON() }, session.targetRelayUrls)
         .catch(() => {});
     };
 
@@ -153,9 +157,12 @@ export class WebRtcManager {
     };
   }
 
-  /** Initiate (or re-initiate) an outbound connection to peerId. */
-  async dial(peerId) {
-    const session = this.#session(peerId);
+  /** Initiate (or re-initiate) an outbound connection to peerId using its advertised relays. */
+  async dial(peerId, targetRelayUrls = null) {
+    const session = this.#session(peerId, targetRelayUrls);
+    if (targetRelayUrls) {
+      session.targetRelayUrls = targetRelayUrls;
+    }
     if (!session.channel) {
       this.#bindChannel(
         peerId,
@@ -167,17 +174,24 @@ export class WebRtcManager {
       session.makingOffer = true;
       const offer = await session.connection.createOffer();
       await session.connection.setLocalDescription(offer);
-      await this.signaling.send(peerId, {
-        kind: 'sdp',
-        description: session.connection.localDescription.toJSON(),
-      });
+      await this.signaling.send(
+        peerId,
+        {
+          kind: 'sdp',
+          description: session.connection.localDescription.toJSON(),
+        },
+        session.targetRelayUrls,
+      );
     } finally {
       session.makingOffer = false;
     }
   }
 
-  async handleSignal(peerId, signal) {
-    const session = this.#session(peerId);
+  async handleSignal(peerId, signal, senderRelayUrls = null) {
+    const session = this.#session(peerId, senderRelayUrls);
+    if (senderRelayUrls && !session.targetRelayUrls) {
+      session.targetRelayUrls = senderRelayUrls;
+    }
     const connection = session.connection;
 
     if (signal.kind === 'sdp') {
@@ -192,10 +206,14 @@ export class WebRtcManager {
       await connection.setRemoteDescription(description);
       if (description.type === 'offer') {
         await connection.setLocalDescription(await connection.createAnswer());
-        await this.signaling.send(peerId, {
-          kind: 'sdp',
-          description: connection.localDescription.toJSON(),
-        });
+        await this.signaling.send(
+          peerId,
+          {
+            kind: 'sdp',
+            description: connection.localDescription.toJSON(),
+          },
+          session.targetRelayUrls,
+        );
       }
       return;
     }

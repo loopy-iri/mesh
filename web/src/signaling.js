@@ -24,11 +24,42 @@ export class SignalingClient {
     }
   }
 
-  async send(targetPeerId, signal) {
+  /** Dynamically add relays discovered through P2P mesh gossip. */
+  addDiscoveredRelays(urls) {
+    const incoming = Array.isArray(urls) ? urls : [urls];
+    let added = 0;
+    for (const raw of incoming) {
+      if (!raw) continue;
+      const clean = raw.trim().replace(/\/+$/, '');
+      if (clean && !this.baseUrls.includes(clean)) {
+        this.baseUrls.push(clean);
+        added += 1;
+      }
+    }
+    return added;
+  }
+
+  /**
+   * Send a signaling envelope.
+   * If targetRelayUrls is specified, tries reaching the target's advertised relays first!
+   */
+  async send(targetPeerId, signal, targetRelayUrls = null) {
+    const targets = [];
+    if (targetRelayUrls) {
+      const list = Array.isArray(targetRelayUrls) ? targetRelayUrls : [targetRelayUrls];
+      for (const u of list) {
+        if (u) targets.push(u.trim().replace(/\/+$/, ''));
+      }
+    }
+    // Also append current relay pool as fallback
+    for (const u of this.baseUrls) {
+      if (!targets.includes(u)) targets.push(u);
+    }
+
     let lastError;
-    for (let attempt = 0; attempt < this.baseUrls.length; attempt++) {
+    for (const baseUrl of targets) {
       try {
-        const response = await fetch(`${this.currentBaseUrl}/signal/send`, {
+        const response = await fetch(`${baseUrl}/signal/send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ targetPeerId, senderId: this.peerId, signal }),
@@ -37,10 +68,9 @@ export class SignalingClient {
         lastError = new Error(`signal send failed: ${response.status}`);
       } catch (err) {
         lastError = err;
-        this.nextRelay();
       }
     }
-    throw lastError || new Error('All relays unreachable');
+    throw lastError || new Error('All target relays unreachable');
   }
 
   start() {
