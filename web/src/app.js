@@ -9,7 +9,7 @@
  */
 
 import { generateIdentity } from './crypto.js';
-import { identityStore, messageStore, peerStore, ledgerStore, wipeEverything } from './db.js';
+import { identityStore, messageStore, peerStore, ledgerStore, wipeEverything, mailboxQueueStore } from './db.js';
 import { DirectConnectManager } from './direct-connect.js';
 import { PUBLIC_CHANNEL, verifyLedgerIntegrity } from './ledger.js';
 import { MeshNode } from './mesh.js';
@@ -200,6 +200,8 @@ async function renderChatMessages() {
         statusHtml = '<span class="msg-status-ok" title="تحویل داده شد">✓✓</span>';
       } else if (msg.status === 'SENT') {
         statusHtml = '<span class="msg-status-sent" title="ارسال شد">✓</span>';
+      } else if (msg.status === 'RELAY_DEPOSITED') {
+        statusHtml = '<span class="msg-status-relay" title="سپرده شده در صندوق کور رله (آفلاین)">📬 رله موقت</span>';
       } else {
         statusHtml = '<span class="msg-status-pending" title="در صف ارسال">🕒</span>';
       }
@@ -210,10 +212,15 @@ async function renderChatMessages() {
       ? `<span class="block-tag" data-hash="${msg.blockHash}" title="مشاهده مشخصات بلاک در دفترکل">بلاک #${blockIndex} ⛓️</span>`
       : '';
 
+    const viaMailboxBadge = msg.viaBlindMailbox
+      ? `<span class="e2ee-badge" style="font-size: 0.65rem; padding: 0.1rem 0.35rem;" title="دریافت شده از صندوق کور و سوخته از سرور">📬 رله کور سوخته</span>`
+      : '';
+
     bubble.innerHTML = `
       ${senderHtml}
       <div class="message-text">${escapeHtml(msg.payload)}</div>
       <div class="message-footer">
+        ${viaMailboxBadge}
         ${blockBadge}
         <span class="message-time">${timeStr}</span>
         ${statusHtml}
@@ -500,6 +507,89 @@ async function renderServices() {
   }
 }
 
+async function renderRelayManager() {
+  const list = $('relay-manager-list');
+  if (!list || !node) return;
+  list.innerHTML = '';
+
+  const relays = await node.getRelaysWithStatus();
+  const pill = $('relay-manager-count-pill');
+  if (pill) pill.textContent = `${relays.length} رله`;
+
+  for (const r of relays) {
+    const item = document.createElement('li');
+    item.className = 'relay-item';
+
+    const statusClass = r.online ? 'latency-ok' : (r.latencyMs > 0 ? 'latency-bad' : 'latency-pending');
+    const statusText = r.online ? `🟢 ${r.latencyMs}ms` : '🔴 آفلاین / خطا';
+    const defaultBadge = r.isDefault ? '<span class="badge" style="font-size: 0.7rem;">پیش‌فرض</span>' : '';
+    const deleteBtn = !r.isDefault
+      ? `<button class="danger btn-sm delete-relay-btn" data-url="${r.url}">حذف 🗑️</button>`
+      : '';
+
+    item.innerHTML = `
+      <div class="relay-main-row">
+        <span class="relay-url">${escapeHtml(r.url)}</span>
+        <div class="relay-badges">
+          ${defaultBadge}
+          <span class="latency-pill ${statusClass}" id="latency-${encodeURIComponent(r.url)}">${statusText}</span>
+        </div>
+      </div>
+      <div class="relay-actions">
+        <button class="secondary btn-sm test-relay-btn" data-url="${r.url}">تست پینگ ⚡</button>
+        ${deleteBtn}
+      </div>
+    `;
+
+    list.appendChild(item);
+  }
+
+  // Bind test ping buttons
+  list.querySelectorAll('.test-relay-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const url = btn.dataset.url;
+      btn.disabled = true;
+      btn.textContent = 'در حال تست…';
+      const res = await node.signaling.pingRelay(url);
+      btn.disabled = false;
+      btn.textContent = 'تست پینگ ⚡';
+      const latencyEl = $(`latency-${encodeURIComponent(url)}`);
+      if (latencyEl) {
+        latencyEl.className = `latency-pill ${res.ok ? 'latency-ok' : 'latency-bad'}`;
+        latencyEl.textContent = res.ok ? `🟢 ${res.latencyMs}ms` : '🔴 آفلاین';
+      }
+    });
+  });
+
+  // Bind delete buttons
+  list.querySelectorAll('.delete-relay-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const url = btn.dataset.url;
+      await node.removeRelay(url);
+      await refreshAll();
+    });
+  });
+}
+
+async function updatePhoneRelayUI() {
+  const phoneToggle = $('phone-relay-toggle');
+  const phoneStatus = $('phone-relay-status');
+  const phoneQueueCount = $('phone-relay-queue-count');
+
+  if (!phoneToggle || !node) return;
+  phoneToggle.checked = node.phoneRelayMode;
+  if (phoneStatus) {
+    phoneStatus.textContent = node.phoneRelayMode
+      ? 'وضعیت: فعال 🟢 (گوشی در حال رله موقت و امن بسته‌ها است)'
+      : 'وضعیت: غیرفعال';
+    phoneStatus.style.color = node.phoneRelayMode ? '#34d399' : '#60a5fa';
+  }
+  if (phoneQueueCount) {
+    const queued = await mailboxQueueStore.all();
+    phoneQueueCount.textContent = `${queued.length} بسته در صف تحویل`;
+  }
+}
+
 
 window.startChatWith = (peerId) => {
   const chatTab = document.querySelector('.tab[data-tab="chat"]');
@@ -603,6 +693,41 @@ function bindIdentityControls() {
       $('invite-text').select();
     }
   });
+
+  // Phone Relay Mode toggle listener
+  const phoneToggle = $('phone-relay-toggle');
+  if (phoneToggle) {
+    phoneToggle.addEventListener('change', async () => {
+      await node.setPhoneRelayMode(phoneToggle.checked);
+      await updatePhoneRelayUI();
+    });
+  }
+
+  // Add custom relay button listener
+  const addRelayBtn = $('add-custom-relay-btn');
+  const addRelayInput = $('add-custom-relay-input');
+  if (addRelayBtn && addRelayInput) {
+    addRelayBtn.addEventListener('click', async () => {
+      const url = addRelayInput.value.trim();
+      if (!url) return;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        appendLog('آدرس رله باید با http:// یا https:// شروع شود');
+        return;
+      }
+      addRelayBtn.disabled = true;
+      appendLog(`در حال بررسی و افزودن رله: ${url}…`);
+      const ping = await node.signaling.pingRelay(url);
+      if (!ping.ok) {
+        appendLog(`هشدار: رله فعلاً پاسخ نداد (${ping.error})، اما افزوده شد.`);
+      } else {
+        appendLog(`رله با پینگ ${ping.latencyMs}ms متصل شد.`);
+      }
+      await node.addRelay(url);
+      addRelayInput.value = '';
+      addRelayBtn.disabled = false;
+      await refreshAll();
+    });
+  }
 }
 
 /* ==========================================================================
@@ -618,7 +743,14 @@ function updateNetworkStatus() {
 }
 
 async function refreshAll() {
-  await Promise.all([renderConversations(), renderChatMessages(), renderPeers(), renderServices()]);
+  await Promise.all([
+    renderConversations(),
+    renderChatMessages(),
+    renderPeers(),
+    renderServices(),
+    renderRelayManager(),
+    updatePhoneRelayUI(),
+  ]);
 }
 
 /* ==========================================================================

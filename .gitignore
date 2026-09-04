@@ -42,3 +42,4 @@ cloudflared.exe
 *.swo
 .DS_Store
 Thumbs.db
+scratch/

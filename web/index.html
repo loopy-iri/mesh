@@ -74,6 +74,9 @@
                 </div>
               </div>
               <div class="chat-header-actions">
+                <span class="e2ee-badge" id="chat-e2ee-badge" title="رمزنگاری سرتاسری صفر-دانش و نابودی پس از خواندن">
+                  🔐 E2EE ایمن
+                </span>
                 <span class="blockchain-verified-tag" id="chat-ledger-badge" title="هر پیام با رمزنگاری در دفترکل زنجیره‌ای ثبت می‌شود">
                   🔒 دفترکل معتبر
                 </span>
@@ -257,6 +260,17 @@
               </p>
             </div>
           </div>
+
+          <!-- Step 6 -->
+          <div class="guide-card">
+            <div class="guide-card-icon">📬</div>
+            <div class="guide-card-content">
+              <h3>۶. اگر تصادفی همه باهم آفلاین شدند، رله کور چطور کار می‌کند؟</h3>
+              <p>
+                اگر مخاطب شما آفلاین باشد، پیام شما با <strong>رمزنگاری دوطرفه (E2EE)</strong> درون صندوق کور رله قرار می‌گیرد. <strong>رله هیچ چیزی از متن، فرستنده یا گیرنده نمی‌فهمد!</strong> همچنین هر کسی می‌تواند رله خودش را بسازد و با بقیه رله‌ها متصل کند. به محض اینکه مخاطب آنلاین شد و پیام را دریافت کرد، پیام بلافاصله از روی سرور سوخته و نابود می‌شود (Burn-After-Reading).
+              </p>
+            </div>
+          </div>
         </div>
 
         <div class="card" style="text-align: center;">
@@ -290,6 +304,53 @@
             <button id="save-relay" class="secondary">ذخیره تنظیمات</button>
             <button id="regenerate-identity" class="danger">تولید هویت جدید (پاکسازی)</button>
           </div>
+        </div>
+
+        <!-- Phone as Mobile Mesh Relay Card -->
+        <div class="phone-relay-card">
+          <div class="toggle-container">
+            <div>
+              <h3 style="display: flex; align-items: center; gap: 0.5rem; font-size: 1.05rem;">
+                <span>📱</span> گوشی در نقش رله مش (Mobile Mesh Relay)
+              </h3>
+              <p class="hint" style="margin-top: 0.35rem;">
+                اگر فعال باشد، گوشی شما بسته‌های رمزنگاری‌شده همتایان آفلاین را به شکل موقت در دیتابیس امن نگه می‌دارد تا هنگام جابجایی فیزیکی یا اتصال به شبکه آنها، پیام را دست‌به‌دست تحویل دهد (Store-and-Forward / Sneakernet).
+              </p>
+            </div>
+            <label class="switch" title="فعال/غیرفعال‌سازی رله مش موبایل">
+              <input type="checkbox" id="phone-relay-toggle" />
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="row" style="margin-top: 0.75rem; align-items: center; justify-content: space-between;">
+            <span id="phone-relay-status" class="meta" style="color: #60a5fa;">وضعیت: غیرفعال</span>
+            <span id="phone-relay-queue-count" class="badge">۰ بسته در صف تحویل</span>
+          </div>
+        </div>
+
+        <!-- Custom Relays & Blind Mailbox Manager Card -->
+        <div class="card" style="margin-top: 1rem;">
+          <div class="card-header-with-badge">
+            <h2>مدیریت رله‌های سفارشی و فدراسیون</h2>
+            <span id="relay-manager-count-pill" class="badge">۱ رله</span>
+          </div>
+          <p class="hint">
+            هر شخصی می‌تواند رله مستقل خود را (روی Railway، سرور خانگی یا داکر) بسازد و به راحتی آدرس آن را اضافه کند. رله‌ها با هم فدراسیون داشته و بسته‌های کور را به یکدیگر منتقل می‌کنند.
+          </p>
+
+          <div class="privacy-banner">
+            🛡️ <strong>ضمانت حریم خصوصی کامل (Zero-Knowledge):</strong><br>
+            رله‌ها صرفاً گذرگاه موقت هستند و هیچ‌گاه متن پیام، هویت فرستنده یا گیرنده را نمی‌بینند. تمام بسته‌ها دارای امضای دیجیتال و رمزنگاری سرتاسری AES-GCM-256 بوده و با نخستین دریافت، از حافظه سرور برای همیشه سوخته و حذف می‌گردند (Burn-After-Reading).
+          </div>
+
+          <div class="row" style="margin-top: 1rem;">
+            <input id="add-custom-relay-input" type="text" inputmode="url" placeholder="https://my-relay.up.railway.app یا http://192.168.1.10:8080" style="flex: 1;" />
+            <button id="add-custom-relay-btn" class="btn-large">افزودن رله ➕</button>
+          </div>
+
+          <ul id="relay-manager-list" class="relay-list">
+            <!-- Rendered by JS -->
+          </ul>
         </div>
       </section>
 

@@ -1,4 +1,4 @@
-"""Tests for the signaling relay: mailbox semantics plus live HTTP round-trip."""
+"""Tests for the signaling relay: mailbox semantics, blind mailboxes, and live HTTP round-trip."""
 
 import json
 import threading
@@ -39,6 +39,25 @@ class MailboxTests(unittest.TestCase):
         self.assertEqual(len(box.drain("peer-b")), signaling.MAX_QUEUE_PER_PEER)
 
 
+class BlindMailboxTests(unittest.TestCase):
+    def test_blind_deposit_and_drain(self):
+        box = signaling.BlindMailboxes()
+        token = "test-token-123"
+        box.put(token, {"ciphertext": "encrypted-data-blob"})
+        drained = box.drain(token)
+        self.assertEqual(len(drained), 1)
+        self.assertEqual(drained[0]["ciphertext"], "encrypted-data-blob")
+        # Burn after reading: subsequent drain must be empty
+        self.assertEqual(box.drain(token), [])
+
+    def test_blind_expired_dropped(self):
+        box = signaling.BlindMailboxes(ttl=0.05)
+        token = "test-token-456"
+        box.put(token, {"ciphertext": "old-data"})
+        time.sleep(0.1)
+        self.assertEqual(box.drain(token), [])
+
+
 class HttpRelayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -70,6 +89,7 @@ class HttpRelayTests(unittest.TestCase):
     def test_health(self):
         body = json.loads(self.get("/signal/health").read())
         self.assertEqual(body["status"], "ok")
+        self.assertIn("blindMailboxes", body)
 
     def test_offer_answer_round_trip(self):
         offer = {"kind": "sdp", "description": {"type": "offer", "sdp": "v=0"}}
@@ -100,6 +120,29 @@ class HttpRelayTests(unittest.TestCase):
         })
         thread.join(timeout=6)
         self.assertEqual(len(result["body"]["signals"]), 1)
+
+    def test_blind_mailbox_roundtrip(self):
+        token = "blind-tok-xyz789"
+        envelope = {"iv": "123", "ciphertext": "a8fbc..."}
+        res = self.post("/mailbox/deposit", {
+            "mailboxToken": token,
+            "envelope": envelope,
+        })
+        self.assertEqual(res.status, 202)
+
+        drain_res = json.loads(self.get(f"/mailbox/drain/{token}").read())
+        self.assertEqual(len(drain_res["envelopes"]), 1)
+        self.assertEqual(drain_res["envelopes"][0]["ciphertext"], "a8fbc...")
+
+        # Burned
+        second_drain = json.loads(self.get(f"/mailbox/drain/{token}").read())
+        self.assertEqual(second_drain["envelopes"], [])
+
+    def test_relay_peers_and_join(self):
+        join_res = json.loads(self.post("/relay/join", {"relayUrl": "https://relay-peer.example"}).read())
+        self.assertEqual(join_res["status"], "joined")
+        peers_res = json.loads(self.get("/relay/peers").read())
+        self.assertIn("https://relay-peer.example", peers_res["peers"])
 
     def test_rejects_incomplete_payload(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:

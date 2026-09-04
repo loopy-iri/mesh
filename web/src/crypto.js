@@ -161,3 +161,129 @@ export async function verifyDescriptorSignature(publicKeyPem, descriptor) {
   return verifySignature(publicKeyPem, descriptorFields(descriptor), descriptor.signature);
 }
 
+/**
+ * Derives a blind, zero-knowledge mailbox token for storing offline envelopes.
+ * The relay sees only this cryptographic hash and has no knowledge of peerId.
+ */
+export async function deriveMailboxToken(peerId) {
+  return sha256Hex(`BLIND_MBX:${peerId}`);
+}
+
+/**
+ * End-to-End Encrypt (E2EE) a payload using ephemeral ECDH + AES-GCM-256.
+ * Guarantees that only the holder of recipientPrivateKeyPem can decrypt,
+ * and relays or intermediaries see only opaque ciphertext.
+ */
+export async function encryptEnvelope(recipientPublicKeyPem, plaintext, senderPrivateKeyPem = null) {
+  // 1. Generate ephemeral ECDH keypair
+  const ephem = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveKey'],
+  );
+  const ephemSpki = await crypto.subtle.exportKey('spki', ephem.publicKey);
+  const ephemPublicKeyPem = toPem(bytesToBase64(ephemSpki), 'PUBLIC KEY');
+
+  // 2. Import recipient's public key as ECDH
+  const recipientEcdhPub = await crypto.subtle.importKey(
+    'spki',
+    fromPem(recipientPublicKeyPem),
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    [],
+  );
+
+  // 3. Derive 256-bit AES-GCM symmetric key
+  const sharedKey = await crypto.subtle.deriveKey(
+    { name: 'ECDH', public: recipientEcdhPub },
+    ephem.privateKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt'],
+  );
+
+  // 4. Encrypt plaintext
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encodedPlaintext = encoder.encode(plaintext);
+  const ciphertextBuffer = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    sharedKey,
+    encodedPlaintext,
+  );
+
+  const ivBase64 = bytesToBase64(iv);
+  const ciphertextBase64 = bytesToBase64(ciphertextBuffer);
+
+  // 5. Optional sender signature over ciphertext for authentication
+  let signature = null;
+  if (senderPrivateKeyPem) {
+    signature = await signData(senderPrivateKeyPem, [ivBase64, ciphertextBase64]);
+  }
+
+  return {
+    ephemPublicKeyPem,
+    iv: ivBase64,
+    ciphertext: ciphertextBase64,
+    signature,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Decrypt an E2EE envelope using the recipient's private key.
+ */
+export async function decryptEnvelope(recipientPrivateKeyPem, envelope, senderPublicKeyPem = null) {
+  if (!envelope || !envelope.ephemPublicKeyPem || !envelope.iv || !envelope.ciphertext) {
+    throw new Error('ساختار بسته رمزنگاری‌شده ناقص است');
+  }
+
+  // 1. Verify sender signature if provided
+  if (senderPublicKeyPem && envelope.signature) {
+    const valid = await verifySignature(
+      senderPublicKeyPem,
+      [envelope.iv, envelope.ciphertext],
+      envelope.signature,
+    );
+    if (!valid) throw new Error('امضای دیجیتال بسته رمزنگاری‌شده نامعتبر است');
+  }
+
+  // 2. Import ephemeral public key
+  const ephemPub = await crypto.subtle.importKey(
+    'spki',
+    fromPem(envelope.ephemPublicKeyPem),
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    [],
+  );
+
+  // 3. Import recipient's private key as ECDH
+  const recipientEcdhPriv = await crypto.subtle.importKey(
+    'pkcs8',
+    fromPem(recipientPrivateKeyPem),
+    { name: 'ECDH', namedCurve: 'P-256' },
+    false,
+    ['deriveKey'],
+  );
+
+  // 4. Derive the matching 256-bit AES-GCM key
+  const sharedKey = await crypto.subtle.deriveKey(
+    { name: 'ECDH', public: ephemPub },
+    recipientEcdhPriv,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['decrypt'],
+  );
+
+  // 5. Decrypt ciphertext
+  const ivBytes = base64ToBytes(envelope.iv);
+  const ciphertextBytes = base64ToBytes(envelope.ciphertext);
+  const decryptedBuffer = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: ivBytes },
+    sharedKey,
+    ciphertextBytes,
+  );
+
+  return new TextDecoder().decode(decryptedBuffer);
+}
+
+

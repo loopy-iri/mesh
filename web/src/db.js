@@ -6,10 +6,11 @@
  * - messages: chat messages keyed by messageId
  * - ledger: immutable blockchain blocks keyed by blockHash
  * - services: known signaling relays & network services keyed by url
+ * - mailboxQueue: buffered encrypted blind envelopes when acting as a mobile mesh relay
  */
 
 const DB_NAME = 'p2psecure';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const IDENTITY_KEY = 'local';
 
 let dbPromise = null;
@@ -39,6 +40,11 @@ function openDatabase() {
       }
       if (!db.objectStoreNames.contains('services')) {
         db.createObjectStore('services', { keyPath: 'url' });
+      }
+      if (!db.objectStoreNames.contains('mailboxQueue')) {
+        const q = db.createObjectStore('mailboxQueue', { keyPath: 'id' });
+        q.createIndex('recipientId', 'recipientId');
+        q.createIndex('createdAt', 'createdAt');
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -99,6 +105,14 @@ export const serviceStore = {
   clear: () => run('services', 'readwrite', (store) => store.clear()),
 };
 
+export const mailboxQueueStore = {
+  get: (id) => run('mailboxQueue', 'readonly', (store) => store.get(id)),
+  all: () => run('mailboxQueue', 'readonly', (store) => store.getAll()),
+  put: (item) => run('mailboxQueue', 'readwrite', (store) => store.put(item)),
+  delete: (id) => run('mailboxQueue', 'readwrite', (store) => store.delete(id)),
+  clear: () => run('mailboxQueue', 'readwrite', (store) => store.clear()),
+};
+
 export async function wipeEverything() {
   await Promise.all([
     identityStore.clear(),
@@ -106,5 +120,6 @@ export async function wipeEverything() {
     messageStore.clear(),
     ledgerStore.clear(),
     serviceStore.clear(),
+    mailboxQueueStore.clear(),
   ]);
 }

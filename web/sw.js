@@ -1,5 +1,5 @@
 /* Complete offline app-shell cache so the PWA opens and works 100% offline. */
-const CACHE = 'p2psecure-v2';
+const CACHE = 'p2psecure-v3';
 const SHELL = [
   './',
   './index.html',
@@ -35,8 +35,13 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Never cache live signaling polling or signaling send requests.
-  if (event.request.method !== 'GET' || url.pathname.startsWith('/signal/')) return;
+  // Never cache live signaling or dynamic mailbox/relay requests.
+  if (
+    event.request.method !== 'GET' ||
+    url.pathname.startsWith('/signal/') ||
+    url.pathname.startsWith('/mailbox/') ||
+    url.pathname.startsWith('/relay/')
+  ) return;
   event.respondWith(
     caches.match(event.request).then((hit) => hit || fetch(event.request).catch(() => caches.match('./index.html'))),
   );

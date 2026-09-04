@@ -4,8 +4,18 @@
  * and decentralized connection descriptor & service directory synchronization.
  */
 
-import { derivePeerId, randomId, signData, verifySignature, signDescriptor, verifyDescriptorSignature } from './crypto.js';
-import { messageStore, peerStore, ledgerStore, serviceStore } from './db.js';
+import {
+  derivePeerId,
+  randomId,
+  signData,
+  verifySignature,
+  signDescriptor,
+  verifyDescriptorSignature,
+  deriveMailboxToken,
+  encryptEnvelope,
+  decryptEnvelope,
+} from './crypto.js';
+import { messageStore, peerStore, ledgerStore, serviceStore, mailboxQueueStore } from './db.js';
 import { createBlock, validateBlock, PUBLIC_CHANNEL } from './ledger.js';
 import { SignalingClient } from './signaling.js';
 import { WebRtcManager } from './webrtc.js';
@@ -85,6 +95,7 @@ export class MeshNode extends EventTarget {
     const storedSeq = parseInt(localStorage.getItem('p2psecure.descriptorSeq') || '1', 10);
     this.sequence = isNaN(storedSeq) ? 1 : storedSeq;
     this.alias = localStorage.getItem('p2psecure.userAlias') || '';
+    this.phoneRelayMode = localStorage.getItem('p2psecure.phoneRelayMode') === 'true';
 
     this.seenMessageIds = new Set();
     this.timers = [];
@@ -110,6 +121,8 @@ export class MeshNode extends EventTarget {
 
     this.timers.push(setInterval(() => this.publishGossip(), GOSSIP_INTERVAL_MS));
     this.timers.push(setInterval(() => this.runReconnectPass(), RECONNECT_TICK_MS));
+    // Periodic drain of blind mailboxes from all relays (every 25 seconds)
+    this.timers.push(setInterval(() => this.drainMyBlindMailbox(), 25_000));
 
     this.onlineHandler = () => this.wakeUp();
     this.visibilityHandler = () => {
@@ -118,6 +131,7 @@ export class MeshNode extends EventTarget {
     window.addEventListener('online', this.onlineHandler);
     document.addEventListener('visibilitychange', this.visibilityHandler);
     this.runReconnectPass();
+    this.drainMyBlindMailbox();
   }
 
   stop() {
@@ -137,6 +151,7 @@ export class MeshNode extends EventTarget {
         .map((peer) => peerStore.put({ ...peer, nextRetryAt: 0, status: 'DISCONNECTED' })),
     );
     this.runReconnectPass();
+    this.drainMyBlindMailbox();
     this.#emitChange();
   }
 
@@ -172,10 +187,150 @@ export class MeshNode extends EventTarget {
       sequence: this.sequence,
       relayUrls: this.relayUrls,
       alias: this.alias,
+      isMobileRelay: this.phoneRelayMode,
       timestamp: Date.now(),
     };
     desc.signature = await signDescriptor(this.identity.privateKeyPem, desc);
     return desc;
+  }
+
+  async setPhoneRelayMode(enabled) {
+    this.phoneRelayMode = Boolean(enabled);
+    localStorage.setItem('p2psecure.phoneRelayMode', String(this.phoneRelayMode));
+    this.#log(
+      this.phoneRelayMode
+        ? 'نقش رله مش موبایل (Phone Mesh Relay) فعال شد. بسته‌ها برای سایرین به شکل موقت و محرمانه نگهداری و بازپخش می‌شوند.'
+        : 'نقش رله مش موبایل غیرفعال شد.',
+    );
+    await this.updateConnectionDetails({});
+  }
+
+  async addRelay(url) {
+    if (!url) return false;
+    const clean = url.trim().replace(/\/+$/, '');
+    if (!clean) return false;
+    if (!this.relayUrls.includes(clean)) {
+      this.relayUrls.push(clean);
+    }
+    this.signaling.addDiscoveredRelays([clean]);
+    await serviceStore.put({ url: clean, addedManually: true, discoveredAt: Date.now() });
+    await this.updateConnectionDetails({ relayUrls: this.relayUrls });
+    this.#log(`رله جدید افزوده شد: ${clean}`);
+    return true;
+  }
+
+  async removeRelay(url) {
+    if (!url) return;
+    const clean = url.trim().replace(/\/+$/, '');
+    this.relayUrls = this.relayUrls.filter((u) => u !== clean);
+    if (this.relayUrls.length === 0) {
+      this.relayUrls = [window.location.origin];
+    }
+    this.signaling.removeRelay(clean);
+    await serviceStore.delete(clean);
+    await this.updateConnectionDetails({ relayUrls: this.relayUrls });
+    this.#log(`رله حذف شد: ${clean}`);
+  }
+
+  async getRelaysWithStatus() {
+    const allUrls = Array.from(new Set([...this.relayUrls, ...this.signaling.baseUrls]));
+    const results = [];
+    for (const u of allUrls) {
+      const ping = await this.signaling.pingRelay(u);
+      results.push({
+        url: u,
+        isDefault: u === window.location.origin,
+        isConfigured: this.relayUrls.includes(u),
+        online: ping.ok,
+        latencyMs: ping.latencyMs,
+      });
+    }
+    return results;
+  }
+
+  /**
+   * Drain and burn zero-knowledge blind mailbox envelopes stored on relays.
+   */
+  async drainMyBlindMailbox() {
+    try {
+      const myToken = await deriveMailboxToken(this.identity.peerId);
+      const envelopes = await this.signaling.drainBlindMailbox(myToken);
+      if (!envelopes || envelopes.length === 0) return 0;
+
+      let accepted = 0;
+      for (const envelope of envelopes) {
+        try {
+          const decryptedText = await decryptEnvelope(this.identity.privateKeyPem, envelope, null);
+          const data = JSON.parse(decryptedText);
+          if (!data || !data.senderId || !data.messageId) continue;
+          if (!this.#remember(data.messageId)) continue;
+
+          let sender = await peerStore.get(data.senderId);
+          if (!sender && data.senderDescriptor) {
+            const derived = await derivePeerId(data.senderDescriptor.publicKeyPem);
+            if (derived === data.senderId) {
+              sender = newPeerRecord(data.senderDescriptor, 'BLIND_MAILBOX');
+              await peerStore.put(sender);
+            }
+          }
+          if (!sender) continue;
+
+          if (envelope.signature) {
+            const validSig = await verifySignature(
+              sender.publicKeyPem,
+              [envelope.iv, envelope.ciphertext],
+              envelope.signature,
+            );
+            if (!validSig) {
+              this.#log(`رد بسته رله: امضای دیجیتال فرستنده نامعتبر است`);
+              continue;
+            }
+          }
+
+          if (data.block) {
+            const check = await validateBlock(data.block, sender.publicKeyPem);
+            if (!check.valid) {
+              this.#log(`خطای بلاک رله: ${check.reason}`);
+              continue;
+            }
+            await ledgerStore.put(data.block);
+          }
+
+          await messageStore.put({
+            messageId: data.messageId,
+            blockHash: data.block ? data.block.blockHash : null,
+            index: data.block ? data.block.index : null,
+            previousHash: data.block ? data.block.previousHash : null,
+            senderId: data.senderId,
+            recipientId: this.identity.peerId,
+            isPublic: false,
+            hopCount: 0,
+            ttl: DEFAULT_TTL,
+            payload: data.payload,
+            signature: data.signature,
+            status: 'DELIVERED',
+            viaBlindMailbox: true,
+            createdAt: data.block ? data.block.timestamp : Date.now(),
+            deliveredAt: Date.now(),
+          });
+
+          accepted += 1;
+          this.#log(
+            `پیام از صندوق رله کور با رمزنگاری صفر-دانش دریافت شد (از ${data.senderId.slice(0, 8)}). بسته از روی رله سوخته و حذف گردید.`,
+          );
+        } catch (innerErr) {
+          console.warn('Error processing decrypted blind mailbox envelope:', innerErr);
+        }
+      }
+
+      if (accepted > 0) {
+        this.#emitChange();
+      }
+      return accepted;
+    } catch (err) {
+      console.warn('drainMyBlindMailbox error:', err);
+      return 0;
+    }
   }
 
   /**
@@ -325,6 +480,23 @@ export class MeshNode extends EventTarget {
       });
     }
     this.#log(`متصل شد به ${peerId.slice(0, 8)}`);
+
+    // Mobile Mesh Relay: flush any envelopes buffered for this peer while they were offline!
+    if (this.phoneRelayMode) {
+      try {
+        const buffered = await mailboxQueueStore.all();
+        for (const item of buffered) {
+          if (item.recipientId === peerId && item.packet) {
+            this.webrtc.send(peerId, item.packet);
+            await mailboxQueueStore.delete(item.id);
+            this.#log(`رله موبایل مش: پیام ذخیره شده ${item.id.slice(0, 8)} به همتای تازه متصل تحویل داده شد.`);
+          }
+        }
+      } catch (err) {
+        console.warn('Error flushing mobile relay mailboxQueueStore:', err);
+      }
+    }
+
     await this.publishGossip(peerId);
     await this.flushPending();
     this.#emitChange();
@@ -495,7 +667,57 @@ export class MeshNode extends EventTarget {
     };
 
     const routed = this.#route(packet);
-    const newStatus = isPublic ? 'DELIVERED' : (routed ? 'SENT' : 'PENDING');
+    let newStatus = isPublic ? 'DELIVERED' : (routed ? 'SENT' : 'PENDING');
+
+    // If private message could not be delivered directly (peer offline),
+    // deposit to zero-knowledge E2EE blind mailbox on relays!
+    if (!isPublic && !routed) {
+      const peer = await peerStore.get(targetRecipient);
+      if (peer && peer.publicKeyPem) {
+        try {
+          const myDesc = await this.buildDescriptor();
+          const mailboxToken = await deriveMailboxToken(targetRecipient);
+          const plaintext = JSON.stringify({
+            senderId: this.identity.peerId,
+            recipientId: targetRecipient,
+            messageId: block.messageId,
+            payload,
+            signature: block.signature,
+            block,
+            senderDescriptor: myDesc,
+          });
+
+          const envelope = await encryptEnvelope(
+            peer.publicKeyPem,
+            plaintext,
+            this.identity.privateKeyPem,
+          );
+
+          const targetRelays = [
+            ...(peer.relayUrls || []),
+            ...this.relayUrls,
+            ...this.signaling.baseUrls,
+          ];
+
+          const deposited = await this.signaling.depositBlindMailbox(
+            mailboxToken,
+            envelope,
+            targetRelays,
+            true,
+          );
+
+          if (deposited) {
+            newStatus = 'RELAY_DEPOSITED';
+            this.#log(
+              `همتا ${targetRecipient.slice(0, 8)} آفلاین است: پیام با رمزنگاری صفر-دانش (E2EE) به صندوق موقت رله سپرده شد و پس از خواندن سوزانده می‌شود.`,
+            );
+          }
+        } catch (err) {
+          console.warn('Blind mailbox deposit failed:', err);
+        }
+      }
+    }
+
     await messageStore.put({ ...record, status: newStatus });
     this.#emitChange();
     return record;
@@ -504,7 +726,7 @@ export class MeshNode extends EventTarget {
   async flushPending() {
     const messages = await messageStore.all();
     for (const message of messages) {
-      if (message.status !== 'PENDING' || message.senderId !== this.identity.peerId) continue;
+      if ((message.status !== 'PENDING' && message.status !== 'RELAY_DEPOSITED') || message.senderId !== this.identity.peerId) continue;
       const routed = this.#route({
         type: 'DATA_PAYLOAD',
         messageId: message.messageId,
@@ -527,7 +749,9 @@ export class MeshNode extends EventTarget {
           signature: message.signature,
         },
       });
-      if (routed) await messageStore.put({ ...message, status: 'SENT' });
+      if (routed) {
+        await messageStore.put({ ...message, status: 'SENT' });
+      }
     }
     this.#emitChange();
   }
@@ -615,8 +839,19 @@ export class MeshNode extends EventTarget {
     if (packet.recipientId !== this.identity.peerId) {
       const ttl = (packet.ttl || 0) - 1;
       if (ttl <= 0) return;
-      this.#route({ ...packet, ttl, hopCount: (packet.hopCount || 0) + 1 }, fromPeerId);
-      this.#log(`رله شد: ${packet.messageId.slice(0, 8)} (ttl ${ttl})`);
+      const forwarded = this.#route({ ...packet, ttl, hopCount: (packet.hopCount || 0) + 1 }, fromPeerId);
+      if (forwarded) {
+        this.#log(`رله شد: ${packet.messageId.slice(0, 8)} (ttl ${ttl})`);
+      } else if (this.phoneRelayMode) {
+        // Recipient is not reachable in our current mesh: buffer on phone as Mobile Mesh Relay!
+        await mailboxQueueStore.put({
+          id: packet.messageId,
+          recipientId: packet.recipientId,
+          packet,
+          createdAt: Date.now(),
+        });
+        this.#log(`گوشی در نقش رله: پیام ${packet.messageId.slice(0, 8)} برای همتای آفلاین بافر شد.`);
+      }
       return;
     }
 

@@ -1,6 +1,11 @@
 /**
- * Long-polling client for the ephemeral signaling relay. Only carries
- * SDP offers/answers and ICE candidates.
+ * Signaling & Zero-Knowledge Blind Mailbox client.
+ *
+ * Supports:
+ * - Live WebRTC SDP/ICE signaling
+ * - Multi-relay failover
+ * - Zero-knowledge blind mailbox deposit/drain for asynchronous offline messaging
+ * - Relay latency / ping testing
  */
 
 export class SignalingClient {
@@ -39,9 +44,30 @@ export class SignalingClient {
     return added;
   }
 
+  removeRelay(url) {
+    const clean = url.trim().replace(/\/+$/, '');
+    this.baseUrls = this.baseUrls.filter((u) => u !== clean);
+    if (this.baseUrls.length === 0) this.baseUrls = [window.location.origin];
+    this.currentUrlIndex = 0;
+  }
+
+  /** Ping a relay and measure roundtrip latency. */
+  async pingRelay(url) {
+    const clean = url.trim().replace(/\/+$/, '');
+    const start = performance.now();
+    try {
+      const response = await fetch(`${clean}/signal/health`, { method: 'GET' });
+      const latencyMs = Math.round(performance.now() - start);
+      if (!response.ok) return { ok: false, latencyMs, error: response.statusText };
+      const data = await response.json();
+      return { ok: true, latencyMs, data };
+    } catch (err) {
+      return { ok: false, latencyMs: Math.round(performance.now() - start), error: err.message };
+    }
+  }
+
   /**
-   * Send a signaling envelope.
-   * If targetRelayUrls is specified, tries reaching the target's advertised relays first!
+   * Send a live signaling envelope (SDP/ICE).
    */
   async send(targetPeerId, signal, targetRelayUrls = null) {
     const targets = [];
@@ -51,7 +77,6 @@ export class SignalingClient {
         if (u) targets.push(u.trim().replace(/\/+$/, ''));
       }
     }
-    // Also append current relay pool as fallback
     for (const u of this.baseUrls) {
       if (!targets.includes(u)) targets.push(u);
     }
@@ -71,6 +96,61 @@ export class SignalingClient {
       }
     }
     throw lastError || new Error('All target relays unreachable');
+  }
+
+  /**
+   * Deposit an E2EE encrypted envelope into a blind mailbox on the relays.
+   */
+  async depositBlindMailbox(mailboxToken, envelope, targetRelayUrls = null, federate = true) {
+    const targets = [];
+    if (targetRelayUrls) {
+      const list = Array.isArray(targetRelayUrls) ? targetRelayUrls : [targetRelayUrls];
+      for (const u of list) {
+        if (u) targets.push(u.trim().replace(/\/+$/, ''));
+      }
+    }
+    for (const u of this.baseUrls) {
+      if (!targets.includes(u)) targets.push(u);
+    }
+
+    let depositedCount = 0;
+    for (const baseUrl of targets) {
+      try {
+        const response = await fetch(`${baseUrl}/mailbox/deposit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mailboxToken, envelope, federate }),
+        });
+        if (response.ok) depositedCount += 1;
+      } catch (err) {
+        /* try other relays */
+      }
+    }
+    return depositedCount > 0;
+  }
+
+  /**
+   * Drain and burn blind mailbox envelopes across all configured relays.
+   */
+  async drainBlindMailbox(mailboxToken, specificRelayUrls = null) {
+    const targets = specificRelayUrls || this.baseUrls;
+    const collected = [];
+
+    for (const baseUrl of targets) {
+      try {
+        const clean = baseUrl.trim().replace(/\/+$/, '');
+        const response = await fetch(`${clean}/mailbox/drain/${encodeURIComponent(mailboxToken)}`);
+        if (response.ok) {
+          const body = await response.json();
+          if (Array.isArray(body.envelopes)) {
+            collected.push(...body.envelopes);
+          }
+        }
+      } catch (err) {
+        /* ignore offline relay */
+      }
+    }
+    return collected;
   }
 
   start() {
@@ -98,11 +178,9 @@ export class SignalingClient {
           }
         }
       } catch (error) {
-        // Switch to next relay if available and back off
         this.nextRelay();
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     }
   }
 }
-
