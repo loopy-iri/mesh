@@ -18,6 +18,7 @@
         <span class="badge-blockchain" id="blockchain-pill" title="دفترکل بلاکچینی فعال">⛓️ بلاکچین فعال</span>
       </div>
       <div class="top-status">
+        <span id="gateway-bridge-badge" class="pill" style="background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4);" hidden>🌐 پل اینترنت فعال</span>
         <span id="connection-summary" class="pill">در حال اتصال…</span>
         <span id="offline-badge" class="pill pill-offline" hidden>حالت آفلاین</span>
       </div>
@@ -311,20 +312,20 @@
           <div class="toggle-container">
             <div>
               <h3 style="display: flex; align-items: center; gap: 0.5rem; font-size: 1.05rem;">
-                <span>📱</span> گوشی در نقش رله مش (Mobile Mesh Relay)
+                <span>📱</span> همه دستگاه‌ها در نقش رله مش (Serverless P2P Relay)
               </h3>
               <p class="hint" style="margin-top: 0.35rem;">
-                اگر فعال باشد، گوشی شما بسته‌های رمزنگاری‌شده همتایان آفلاین را به شکل موقت در دیتابیس امن نگه می‌دارد تا هنگام جابجایی فیزیکی یا اتصال به شبکه آنها، پیام را دست‌به‌دست تحویل دهد (Store-and-Forward / Sneakernet).
+                تمام دستگاه‌ها به صورت پیش‌فرض نقش رله را ایفا کرده و مشخصات اتصال به‌روز تمام همتاها را ذخیره می‌کنند تا شبکه <strong>کاملاً بدون نیاز به سرور یا رله مرکزی</strong> کار کند. همچنین اگر هر گوشی به اینترنت دسترسی پیدا کند، به عنوان <strong>پل اینترنت (Gateway Bridge)</strong> به طور خودکار پیام‌ها و مشخصات را برای سایر گوشی‌های آفلاین سینک می‌کند.
               </p>
             </div>
             <label class="switch" title="فعال/غیرفعال‌سازی رله مش موبایل">
-              <input type="checkbox" id="phone-relay-toggle" />
+              <input type="checkbox" id="phone-relay-toggle" checked />
               <span class="slider"></span>
             </label>
           </div>
           <div class="row" style="margin-top: 0.75rem; align-items: center; justify-content: space-between;">
-            <span id="phone-relay-status" class="meta" style="color: #60a5fa;">وضعیت: غیرفعال</span>
-            <span id="phone-relay-queue-count" class="badge">۰ بسته در صف تحویل</span>
+            <span id="phone-relay-status" class="meta" style="color: #34d399;">وضعیت رله مش: فعال پیش‌فرض 🟢</span>
+            <span id="phone-relay-queue-count" class="badge">۰ بسته در صف رله فیزیکی</span>
           </div>
         </div>
 
@@ -332,10 +333,13 @@
         <div class="card" style="margin-top: 1rem;">
           <div class="card-header-with-badge">
             <h2>مدیریت رله‌های سفارشی و فدراسیون</h2>
-            <span id="relay-manager-count-pill" class="badge">۱ رله</span>
+            <div style="display: flex; gap: 0.4rem; align-items: center;">
+              <button id="test-all-relays-btn" class="secondary btn-sm">تست همه رله‌ها ⚡</button>
+              <span id="relay-manager-count-pill" class="badge">۱ رله</span>
+            </div>
           </div>
           <p class="hint">
-            هر شخصی می‌تواند رله مستقل خود را (روی Railway، سرور خانگی یا داکر) بسازد و به راحتی آدرس آن را اضافه کند. رله‌ها با هم فدراسیون داشته و بسته‌های کور را به یکدیگر منتقل می‌کنند.
+            هر شخصی می‌تواند رله مستقل خود را (روی Railway، سرور خانگی یا داکر) اضافه کند. رله‌ها با هم فدراسیون داشته و بسته‌های کور را بین هم تبادل می‌کنند؛ ارتباط مستقیم بدون رله هم به طور کامل پشتیبانی می‌شود.
           </p>
 
           <div class="privacy-banner">

@@ -95,7 +95,10 @@ export class MeshNode extends EventTarget {
     const storedSeq = parseInt(localStorage.getItem('p2psecure.descriptorSeq') || '1', 10);
     this.sequence = isNaN(storedSeq) ? 1 : storedSeq;
     this.alias = localStorage.getItem('p2psecure.userAlias') || '';
-    this.phoneRelayMode = localStorage.getItem('p2psecure.phoneRelayMode') === 'true';
+    // Every device inherently acts as a mobile mesh relay by default!
+    this.phoneRelayMode = localStorage.getItem('p2psecure.phoneRelayMode') !== 'false';
+    this.isInternetGateway = false;
+    this.knownGateways = new Set();
 
     this.seenMessageIds = new Set();
     this.timers = [];
@@ -123,6 +126,8 @@ export class MeshNode extends EventTarget {
     this.timers.push(setInterval(() => this.runReconnectPass(), RECONNECT_TICK_MS));
     // Periodic drain of blind mailboxes from all relays (every 25 seconds)
     this.timers.push(setInterval(() => this.drainMyBlindMailbox(), 25_000));
+    // Check internet connectivity & gateway bridge status (every 10 seconds)
+    this.timers.push(setInterval(() => this.checkInternet(), 10_000));
 
     this.onlineHandler = () => this.wakeUp();
     this.visibilityHandler = () => {
@@ -131,6 +136,7 @@ export class MeshNode extends EventTarget {
     window.addEventListener('online', this.onlineHandler);
     document.addEventListener('visibilitychange', this.visibilityHandler);
     this.runReconnectPass();
+    this.checkInternet();
     this.drainMyBlindMailbox();
   }
 
@@ -143,6 +149,32 @@ export class MeshNode extends EventTarget {
     this.webrtc.closeAll();
   }
 
+  async checkInternet() {
+    if (!navigator.onLine) {
+      if (this.isInternetGateway) {
+        this.isInternetGateway = false;
+        this.#emitChange();
+      }
+      return false;
+    }
+    try {
+      const primaryUrl = this.relayUrls[0] || window.location.origin;
+      const res = await this.signaling.pingRelay(primaryUrl, 2500);
+      const prev = this.isInternetGateway;
+      this.isInternetGateway = Boolean(res.ok);
+      if (prev !== this.isInternetGateway) {
+        if (this.isInternetGateway) {
+          this.#log('اینترنت فعال است: این دستگاه نقش پل اینترنت (Internet Gateway Bridge) برای سایر همتایان مش را دارد.');
+        }
+        this.#emitChange();
+      }
+      return this.isInternetGateway;
+    } catch {
+      this.isInternetGateway = false;
+      return false;
+    }
+  }
+
   async wakeUp() {
     const peers = await peerStore.all();
     await Promise.all(
@@ -150,6 +182,7 @@ export class MeshNode extends EventTarget {
         .filter((peer) => peer.status !== 'CONNECTED')
         .map((peer) => peerStore.put({ ...peer, nextRetryAt: 0, status: 'DISCONNECTED' })),
     );
+    this.checkInternet();
     this.runReconnectPass();
     this.drainMyBlindMailbox();
     this.#emitChange();
@@ -188,6 +221,7 @@ export class MeshNode extends EventTarget {
       relayUrls: this.relayUrls,
       alias: this.alias,
       isMobileRelay: this.phoneRelayMode,
+      isInternetGateway: this.isInternetGateway,
       timestamp: Date.now(),
     };
     desc.signature = await signDescriptor(this.identity.privateKeyPem, desc);
@@ -199,10 +233,14 @@ export class MeshNode extends EventTarget {
     localStorage.setItem('p2psecure.phoneRelayMode', String(this.phoneRelayMode));
     this.#log(
       this.phoneRelayMode
-        ? 'نقش رله مش موبایل (Phone Mesh Relay) فعال شد. بسته‌ها برای سایرین به شکل موقت و محرمانه نگهداری و بازپخش می‌شوند.'
-        : 'نقش رله مش موبایل غیرفعال شد.',
+        ? 'نقش رله مش (P2P Mesh Relay) فعال شد: نگهداری و بازپخش امن پیام‌های رمزگذاری‌شده.'
+        : 'نقش رله مش برای این دستگاه غیرفعال شد.',
     );
     await this.updateConnectionDetails({});
+  }
+
+  getRelayUrls() {
+    return Array.from(new Set([...this.relayUrls, ...this.signaling.baseUrls]));
   }
 
   async addRelay(url) {
@@ -232,101 +270,125 @@ export class MeshNode extends EventTarget {
     this.#log(`رله حذف شد: ${clean}`);
   }
 
+  /** Pings all relays concurrently with timeout, preventing UI freeze */
   async getRelaysWithStatus() {
-    const allUrls = Array.from(new Set([...this.relayUrls, ...this.signaling.baseUrls]));
-    const results = [];
-    for (const u of allUrls) {
+    const allUrls = this.getRelayUrls();
+    const promises = allUrls.map(async (u) => {
       const ping = await this.signaling.pingRelay(u);
-      results.push({
+      return {
         url: u,
         isDefault: u === window.location.origin,
         isConfigured: this.relayUrls.includes(u),
         online: ping.ok,
         latencyMs: ping.latencyMs,
-      });
-    }
-    return results;
+      };
+    });
+    return Promise.all(promises);
   }
 
   /**
-   * Drain and burn zero-knowledge blind mailbox envelopes stored on relays.
+   * Helper to decrypt, verify, and store zero-knowledge envelopes.
+   */
+  async #processReceivedEnvelopes(envelopes) {
+    let accepted = 0;
+    for (const envelope of envelopes) {
+      try {
+        const decryptedText = await decryptEnvelope(this.identity.privateKeyPem, envelope, null);
+        const data = JSON.parse(decryptedText);
+        if (!data || !data.senderId || !data.messageId) continue;
+        if (!this.#remember(data.messageId)) continue;
+
+        let sender = await peerStore.get(data.senderId);
+        if (!sender && data.senderDescriptor) {
+          const derived = await derivePeerId(data.senderDescriptor.publicKeyPem);
+          if (derived === data.senderId) {
+            sender = newPeerRecord(data.senderDescriptor, 'BLIND_MAILBOX');
+            await peerStore.put(sender);
+          }
+        }
+        if (!sender) continue;
+
+        if (envelope.signature) {
+          const validSig = await verifySignature(
+            sender.publicKeyPem,
+            [envelope.iv, envelope.ciphertext],
+            envelope.signature,
+          );
+          if (!validSig) {
+            this.#log(`رد بسته رله: امضای دیجیتال فرستنده نامعتبر است`);
+            continue;
+          }
+        }
+
+        if (data.block) {
+          const check = await validateBlock(data.block, sender.publicKeyPem);
+          if (!check.valid) {
+            this.#log(`خطای بلاک رله: ${check.reason}`);
+            continue;
+          }
+          await ledgerStore.put(data.block);
+        }
+
+        await messageStore.put({
+          messageId: data.messageId,
+          blockHash: data.block ? data.block.blockHash : null,
+          index: data.block ? data.block.index : null,
+          previousHash: data.block ? data.block.previousHash : null,
+          senderId: data.senderId,
+          recipientId: this.identity.peerId,
+          isPublic: false,
+          hopCount: 0,
+          ttl: DEFAULT_TTL,
+          payload: data.payload,
+          signature: data.signature,
+          status: 'DELIVERED',
+          viaBlindMailbox: true,
+          createdAt: data.block ? data.block.timestamp : Date.now(),
+          deliveredAt: Date.now(),
+        });
+
+        accepted += 1;
+        this.#log(
+          `پیام با رمزنگاری صفر-دانش دریافت شد (از ${data.senderId.slice(0, 8)}). بسته از روی سرور سوخته و حذف گردید.`,
+        );
+      } catch (innerErr) {
+        console.warn('Error processing decrypted blind mailbox envelope:', innerErr);
+      }
+    }
+
+    if (accepted > 0) {
+      this.#emitChange();
+    }
+    return accepted;
+  }
+
+  /**
+   * Drain and burn zero-knowledge blind mailbox envelopes stored on relays
+   * or via an active Internet Gateway peer in the local mesh.
    */
   async drainMyBlindMailbox() {
     try {
       const myToken = await deriveMailboxToken(this.identity.peerId);
-      const envelopes = await this.signaling.drainBlindMailbox(myToken);
-      if (!envelopes || envelopes.length === 0) return 0;
 
-      let accepted = 0;
-      for (const envelope of envelopes) {
-        try {
-          const decryptedText = await decryptEnvelope(this.identity.privateKeyPem, envelope, null);
-          const data = JSON.parse(decryptedText);
-          if (!data || !data.senderId || !data.messageId) continue;
-          if (!this.#remember(data.messageId)) continue;
-
-          let sender = await peerStore.get(data.senderId);
-          if (!sender && data.senderDescriptor) {
-            const derived = await derivePeerId(data.senderDescriptor.publicKeyPem);
-            if (derived === data.senderId) {
-              sender = newPeerRecord(data.senderDescriptor, 'BLIND_MAILBOX');
-              await peerStore.put(sender);
-            }
-          }
-          if (!sender) continue;
-
-          if (envelope.signature) {
-            const validSig = await verifySignature(
-              sender.publicKeyPem,
-              [envelope.iv, envelope.ciphertext],
-              envelope.signature,
-            );
-            if (!validSig) {
-              this.#log(`رد بسته رله: امضای دیجیتال فرستنده نامعتبر است`);
-              continue;
-            }
-          }
-
-          if (data.block) {
-            const check = await validateBlock(data.block, sender.publicKeyPem);
-            if (!check.valid) {
-              this.#log(`خطای بلاک رله: ${check.reason}`);
-              continue;
-            }
-            await ledgerStore.put(data.block);
-          }
-
-          await messageStore.put({
-            messageId: data.messageId,
-            blockHash: data.block ? data.block.blockHash : null,
-            index: data.block ? data.block.index : null,
-            previousHash: data.block ? data.block.previousHash : null,
-            senderId: data.senderId,
-            recipientId: this.identity.peerId,
-            isPublic: false,
-            hopCount: 0,
-            ttl: DEFAULT_TTL,
-            payload: data.payload,
-            signature: data.signature,
-            status: 'DELIVERED',
-            viaBlindMailbox: true,
-            createdAt: data.block ? data.block.timestamp : Date.now(),
-            deliveredAt: Date.now(),
-          });
-
-          accepted += 1;
-          this.#log(
-            `پیام از صندوق رله کور با رمزنگاری صفر-دانش دریافت شد (از ${data.senderId.slice(0, 8)}). بسته از روی رله سوخته و حذف گردید.`,
-          );
-        } catch (innerErr) {
-          console.warn('Error processing decrypted blind mailbox envelope:', innerErr);
+      // 1. Direct internet drainage from cloud relays
+      if (this.isInternetGateway || navigator.onLine) {
+        const envelopes = await this.signaling.drainBlindMailbox(myToken);
+        if (envelopes && envelopes.length > 0) {
+          return await this.#processReceivedEnvelopes(envelopes);
         }
       }
 
-      if (accepted > 0) {
-        this.#emitChange();
+      // 2. Mesh Gateway Bridge: If we are offline from internet, request any connected gateway peer to drain for us!
+      const connectedGateways = Array.from(this.knownGateways).filter((id) => this.webrtc.isConnected(id));
+      for (const gatewayId of connectedGateways) {
+        this.webrtc.send(gatewayId, {
+          type: 'GATEWAY_DRAIN_REQUEST',
+          senderId: this.identity.peerId,
+          token: myToken,
+        });
       }
-      return accepted;
+
+      return 0;
     } catch (err) {
       console.warn('drainMyBlindMailbox error:', err);
       return 0;
@@ -584,6 +646,19 @@ export class MeshNode extends EventTarget {
       }
     }
 
+    // 3. Track internet gateway bridge peers
+    if (packet.senderDescriptor && packet.senderId) {
+      if (packet.senderDescriptor.isInternetGateway) {
+        this.knownGateways.add(packet.senderId);
+        // If we are offline, ask this newly discovered internet gateway to drain our mailbox!
+        if (!this.isInternetGateway && !navigator.onLine) {
+          this.drainMyBlindMailbox();
+        }
+      } else {
+        this.knownGateways.delete(packet.senderId);
+      }
+    }
+
     if (learned > 0 || updated > 0) {
       if (learned > 0) this.#log(`همتا(های) جدید کشف شد: ${learned}`);
       this.#emitChange();
@@ -670,7 +745,7 @@ export class MeshNode extends EventTarget {
     let newStatus = isPublic ? 'DELIVERED' : (routed ? 'SENT' : 'PENDING');
 
     // If private message could not be delivered directly (peer offline),
-    // deposit to zero-knowledge E2EE blind mailbox on relays!
+    // deposit to zero-knowledge E2EE blind mailbox on relays directly or via mesh internet gateway!
     if (!isPublic && !routed) {
       const peer = await peerStore.get(targetRecipient);
       if (peer && peer.publicKeyPem) {
@@ -699,19 +774,42 @@ export class MeshNode extends EventTarget {
             ...this.signaling.baseUrls,
           ];
 
-          const deposited = await this.signaling.depositBlindMailbox(
-            mailboxToken,
-            envelope,
-            targetRelays,
-            true,
-          );
-
-          if (deposited) {
-            newStatus = 'RELAY_DEPOSITED';
-            this.#log(
-              `همتا ${targetRecipient.slice(0, 8)} آفلاین است: پیام با رمزنگاری صفر-دانش (E2EE) به صندوق موقت رله سپرده شد و پس از خواندن سوزانده می‌شود.`,
+          if (this.isInternetGateway || navigator.onLine) {
+            const deposited = await this.signaling.depositBlindMailbox(
+              mailboxToken,
+              envelope,
+              targetRelays,
+              true,
             );
+            if (deposited) {
+              newStatus = 'RELAY_DEPOSITED';
+              this.#log(
+                `همتا ${targetRecipient.slice(0, 8)} آفلاین است: پیام با رمزنگاری صفر-دانش (E2EE) به صندوق موقت رله سپرده شد و پس از خواندن سوزانده می‌شود.`,
+              );
+            }
+          } else {
+            // Find any connected local peer acting as Internet Gateway Bridge
+            const connectedGatewayId = Array.from(this.knownGateways).find((id) => this.webrtc.isConnected(id));
+            if (connectedGatewayId) {
+              this.webrtc.send(connectedGatewayId, {
+                type: 'GATEWAY_DEPOSIT_REQUEST',
+                messageId: block.messageId,
+                token: mailboxToken,
+                envelope,
+                targetRelays,
+              });
+              newStatus = 'SENT';
+              this.#log(`پیام برای تحویل به رله ابری از طریق پل اینترنت همتا ${connectedGatewayId.slice(0, 8)} ارسال شد.`);
+            }
           }
+
+          // Buffer in local Mobile Mesh Relay queue as physical store-and-forward fallback
+          await mailboxQueueStore.put({
+            id: block.messageId,
+            recipientId: targetRecipient,
+            packet,
+            createdAt: Date.now(),
+          });
         } catch (err) {
           console.warn('Blind mailbox deposit failed:', err);
         }
@@ -789,7 +887,68 @@ export class MeshNode extends EventTarget {
     if (packet.type === 'DESCRIPTOR_UPDATE') return this.#handleDescriptorUpdate(packet);
     if (packet.type === 'DATA_PAYLOAD') return this.#handleDataPayload(fromPeerId, packet);
     if (packet.type === 'DELIVERY_ACK') return this.#handleAck(packet);
+    if (packet.type === 'GATEWAY_DRAIN_REQUEST') return this.#handleGatewayDrainRequest(fromPeerId, packet);
+    if (packet.type === 'GATEWAY_DRAIN_RESPONSE') return this.#handleGatewayDrainResponse(fromPeerId, packet);
+    if (packet.type === 'GATEWAY_DEPOSIT_REQUEST') return this.#handleGatewayDepositRequest(fromPeerId, packet);
+    if (packet.type === 'GATEWAY_DEPOSIT_ACK') return this.#handleGatewayDepositAck(packet);
     return undefined;
+  }
+
+  async #handleGatewayDrainRequest(fromPeerId, packet) {
+    if (!this.isInternetGateway || !packet.token) return;
+    try {
+      const envelopes = await this.signaling.drainBlindMailbox(packet.token);
+      if (envelopes && envelopes.length > 0) {
+        this.webrtc.send(fromPeerId, {
+          type: 'GATEWAY_DRAIN_RESPONSE',
+          token: packet.token,
+          envelopes,
+        });
+        this.#log(`پل اینترنت: ${envelopes.length} بسته از رله ابری دریافت و به همتای مش ${fromPeerId.slice(0, 8)} تحویل شد.`);
+      }
+    } catch (err) {
+      console.warn('Gateway drain request failed:', err);
+    }
+  }
+
+  async #handleGatewayDrainResponse(fromPeerId, packet) {
+    if (Array.isArray(packet.envelopes) && packet.envelopes.length > 0) {
+      this.#log(`دریافت ${packet.envelopes.length} بسته از طریق پل اینترنت همتا (${fromPeerId.slice(0, 8)})`);
+      await this.#processReceivedEnvelopes(packet.envelopes);
+    }
+  }
+
+  async #handleGatewayDepositRequest(fromPeerId, packet) {
+    if (!this.isInternetGateway || !packet.token || !packet.envelope) return;
+    try {
+      const success = await this.signaling.depositBlindMailbox(
+        packet.token,
+        packet.envelope,
+        packet.targetRelays,
+        true,
+      );
+      this.webrtc.send(fromPeerId, {
+        type: 'GATEWAY_DEPOSIT_ACK',
+        messageId: packet.messageId,
+        success,
+      });
+      if (success) {
+        this.#log(`پل اینترنت: بسته همتای آفلاین محلی ${fromPeerId.slice(0, 8)} با موفقیت به رله‌های ابری ارسال شد.`);
+      }
+    } catch (err) {
+      console.warn('Gateway deposit request failed:', err);
+    }
+  }
+
+  async #handleGatewayDepositAck(packet) {
+    if (packet.messageId && packet.success) {
+      const msg = await messageStore.get(packet.messageId);
+      if (msg) {
+        await messageStore.put({ ...msg, status: 'RELAY_DEPOSITED' });
+        this.#log(`پیام شما از طریق پل اینترنت همسایه در صندوق رله ابری سپرده شد.`);
+        this.#emitChange();
+      }
+    }
   }
 
   async #handleDataPayload(fromPeerId, packet) {

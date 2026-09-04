@@ -14,6 +14,7 @@ export class SignalingClient {
     const list = raw.map((u) => u.trim()).filter(Boolean);
     this.baseUrls = list.length > 0 ? list : [window.location.origin];
     this.currentUrlIndex = 0;
+    this.consecutiveFailures = 0;
     this.peerId = peerId;
     this.onSignal = onSignal;
     this.running = false;
@@ -49,20 +50,29 @@ export class SignalingClient {
     this.baseUrls = this.baseUrls.filter((u) => u !== clean);
     if (this.baseUrls.length === 0) this.baseUrls = [window.location.origin];
     this.currentUrlIndex = 0;
+    this.consecutiveFailures = 0;
   }
 
-  /** Ping a relay and measure roundtrip latency. */
-  async pingRelay(url) {
+  /** Ping a relay and measure roundtrip latency with strict timeout. */
+  async pingRelay(url, timeoutMs = 4000) {
     const clean = url.trim().replace(/\/+$/, '');
     const start = performance.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${clean}/signal/health`, { method: 'GET' });
+      const response = await fetch(`${clean}/signal/health`, {
+        method: 'GET',
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
       const latencyMs = Math.round(performance.now() - start);
       if (!response.ok) return { ok: false, latencyMs, error: response.statusText };
       const data = await response.json();
       return { ok: true, latencyMs, data };
     } catch (err) {
-      return { ok: false, latencyMs: Math.round(performance.now() - start), error: err.message };
+      clearTimeout(timer);
+      const latencyMs = Math.round(performance.now() - start);
+      return { ok: false, latencyMs, error: err.name === 'AbortError' ? 'تایم‌اوت' : err.message };
     }
   }
 
@@ -170,6 +180,7 @@ export class SignalingClient {
         const response = await fetch(url);
         if (!response.ok) throw new Error(`poll failed: ${response.status}`);
         const body = await response.json();
+        this.consecutiveFailures = 0;
         for (const entry of body.signals || []) {
           try {
             await this.onSignal(entry.senderId, entry.signal);
@@ -178,7 +189,12 @@ export class SignalingClient {
           }
         }
       } catch (error) {
-        this.nextRelay();
+        this.consecutiveFailures += 1;
+        // Only switch relay after 3 consecutive failures to avoid constant jumping
+        if (this.consecutiveFailures >= 3) {
+          this.nextRelay();
+          this.consecutiveFailures = 0;
+        }
         await new Promise((resolve) => setTimeout(resolve, 3000));
       }
     }

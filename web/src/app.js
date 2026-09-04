@@ -507,44 +507,73 @@ async function renderServices() {
   }
 }
 
+const relayStatusCache = new Map();
+
+function updateRelayLatencyPill(url, status) {
+  const safeId = encodeURIComponent(url).replace(/[%._~-]/g, '_');
+  const latencyEl = $(`latency-${safeId}`);
+  if (!latencyEl) return;
+  if (!status) {
+    latencyEl.className = 'latency-pill latency-pending';
+    latencyEl.textContent = 'آماده تست پینگ';
+    return;
+  }
+  latencyEl.className = `latency-pill ${status.online ? 'latency-ok' : 'latency-bad'}`;
+  latencyEl.textContent = status.online ? `🟢 ${status.latencyMs}ms` : '🔴 آفلاین';
+}
+
 async function renderRelayManager() {
   const list = $('relay-manager-list');
   if (!list || !node) return;
+
+  const urls = node.getRelayUrls();
+  const pill = $('relay-manager-count-pill');
+  if (pill) pill.textContent = `${urls.length} رله`;
+
+  const key = urls.join('|');
+  // If the list of URLs hasn't changed, do not rebuild or wipe DOM to prevent flickering!
+  if (list.dataset.renderedUrls === key) {
+    for (const url of urls) {
+      updateRelayLatencyPill(url, relayStatusCache.get(url));
+    }
+    return;
+  }
+
+  list.dataset.renderedUrls = key;
   list.innerHTML = '';
 
-  const relays = await node.getRelaysWithStatus();
-  const pill = $('relay-manager-count-pill');
-  if (pill) pill.textContent = `${relays.length} رله`;
+  for (const url of urls) {
+    const isDefault = url === window.location.origin;
+    const safeId = encodeURIComponent(url).replace(/[%._~-]/g, '_');
+    const cached = relayStatusCache.get(url);
 
-  for (const r of relays) {
     const item = document.createElement('li');
     item.className = 'relay-item';
 
-    const statusClass = r.online ? 'latency-ok' : (r.latencyMs > 0 ? 'latency-bad' : 'latency-pending');
-    const statusText = r.online ? `🟢 ${r.latencyMs}ms` : '🔴 آفلاین / خطا';
-    const defaultBadge = r.isDefault ? '<span class="badge" style="font-size: 0.7rem;">پیش‌فرض</span>' : '';
-    const deleteBtn = !r.isDefault
-      ? `<button class="danger btn-sm delete-relay-btn" data-url="${r.url}">حذف 🗑️</button>`
+    const defaultBadge = isDefault ? '<span class="badge" style="font-size: 0.7rem;">پیش‌فرض</span>' : '';
+    const deleteBtn = !isDefault
+      ? `<button class="danger btn-sm delete-relay-btn" data-url="${escapeHtml(url)}">حذف 🗑️</button>`
       : '';
 
     item.innerHTML = `
       <div class="relay-main-row">
-        <span class="relay-url">${escapeHtml(r.url)}</span>
+        <span class="relay-url">${escapeHtml(url)}</span>
         <div class="relay-badges">
           ${defaultBadge}
-          <span class="latency-pill ${statusClass}" id="latency-${encodeURIComponent(r.url)}">${statusText}</span>
+          <span class="latency-pill latency-pending" id="latency-${safeId}">آماده تست پینگ</span>
         </div>
       </div>
       <div class="relay-actions">
-        <button class="secondary btn-sm test-relay-btn" data-url="${r.url}">تست پینگ ⚡</button>
+        <button class="secondary btn-sm test-relay-btn" data-url="${escapeHtml(url)}">تست پینگ ⚡</button>
         ${deleteBtn}
       </div>
     `;
 
     list.appendChild(item);
+    updateRelayLatencyPill(url, cached);
   }
 
-  // Bind test ping buttons
+  // Bind individual test ping buttons
   list.querySelectorAll('.test-relay-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const url = btn.dataset.url;
@@ -553,11 +582,9 @@ async function renderRelayManager() {
       const res = await node.signaling.pingRelay(url);
       btn.disabled = false;
       btn.textContent = 'تست پینگ ⚡';
-      const latencyEl = $(`latency-${encodeURIComponent(url)}`);
-      if (latencyEl) {
-        latencyEl.className = `latency-pill ${res.ok ? 'latency-ok' : 'latency-bad'}`;
-        latencyEl.textContent = res.ok ? `🟢 ${res.latencyMs}ms` : '🔴 آفلاین';
-      }
+      const status = { online: res.ok, latencyMs: res.latencyMs };
+      relayStatusCache.set(url, status);
+      updateRelayLatencyPill(url, status);
     });
   });
 
@@ -566,6 +593,8 @@ async function renderRelayManager() {
     btn.addEventListener('click', async () => {
       const url = btn.dataset.url;
       await node.removeRelay(url);
+      relayStatusCache.delete(url);
+      list.dataset.renderedUrls = ''; // force re-render
       await refreshAll();
     });
   });
@@ -575,18 +604,29 @@ async function updatePhoneRelayUI() {
   const phoneToggle = $('phone-relay-toggle');
   const phoneStatus = $('phone-relay-status');
   const phoneQueueCount = $('phone-relay-queue-count');
+  const gatewayBadge = $('gateway-bridge-badge');
 
   if (!phoneToggle || !node) return;
   phoneToggle.checked = node.phoneRelayMode;
   if (phoneStatus) {
     phoneStatus.textContent = node.phoneRelayMode
-      ? 'وضعیت: فعال 🟢 (گوشی در حال رله موقت و امن بسته‌ها است)'
+      ? 'وضعیت رله مش: فعال خودکار برای همه دستگاه‌ها 🟢 (بسته‌های رمزگذاری‌شده دست‌به‌دست رله می‌شوند)'
       : 'وضعیت: غیرفعال';
-    phoneStatus.style.color = node.phoneRelayMode ? '#34d399' : '#60a5fa';
+    phoneStatus.style.color = node.phoneRelayMode ? '#34d399' : '#94a3b8';
   }
   if (phoneQueueCount) {
     const queued = await mailboxQueueStore.all();
-    phoneQueueCount.textContent = `${queued.length} بسته در صف تحویل`;
+    phoneQueueCount.textContent = `${queued.length} بسته در صف رله فیزیکی`;
+  }
+  if (gatewayBadge) {
+    if (node.isInternetGateway) {
+      gatewayBadge.hidden = false;
+      gatewayBadge.className = 'badge-gateway active';
+      gatewayBadge.textContent = '🌐 پل اینترنت فعال (سینک‌کننده مش)';
+      gatewayBadge.title = 'این دستگاه به اینترنت دسترسی دارد و پیام‌ها و مشخصات سایر همتایان مش را با سرور ابری سینک می‌کند.';
+    } else {
+      gatewayBadge.hidden = true;
+    }
   }
 }
 
@@ -726,6 +766,22 @@ function bindIdentityControls() {
       addRelayInput.value = '';
       addRelayBtn.disabled = false;
       await refreshAll();
+    });
+  }
+
+  // Test all relays button
+  const testAllBtn = $('test-all-relays-btn');
+  if (testAllBtn) {
+    testAllBtn.addEventListener('click', async () => {
+      testAllBtn.disabled = true;
+      testAllBtn.textContent = 'در حال تست همه…';
+      const results = await node.getRelaysWithStatus();
+      for (const r of results) {
+        relayStatusCache.set(r.url, { online: r.online, latencyMs: r.latencyMs });
+        updateRelayLatencyPill(r.url, { online: r.online, latencyMs: r.latencyMs });
+      }
+      testAllBtn.disabled = false;
+      testAllBtn.textContent = 'تست همه رله‌ها ⚡';
     });
   }
 }
